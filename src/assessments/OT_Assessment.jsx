@@ -1,4 +1,5 @@
 import { useState, useCallback } from "react";
+import templateUrl from "./ot_template.xlsx?url";
 
 // ── DATA ──────────────────────────────────────────────────────────────────────
 
@@ -9,6 +10,35 @@ const SCALE = [
   { value: 4, label: "Jarang" },
   { value: 5, label: "Tidak Pernah" },
 ];
+
+// ── EXCEL TEMPLATE MAP (OT_Assesment_Form.xlsx) ───────────────────────────────
+// Maps each section's per-item score to its cell (col G, merged G:I) in the
+// bundled template, plus the Kategori cell in the REKAP block (col J) that
+// gets background-colored by classification. Client values go in C8:C15.
+const TEMPLATE_CLIENT_CELLS = {
+  nama: "C8", usia: "C9", tanggalLahir: "C10", jenisKelamin: "C11",
+  diagnosis: "C12", asesor: "C13", tanggalAsesmen: "C14", noClient: "C15",
+};
+// section id -> { rows: [score rows in col G], kategori: rekap cell in col J }
+const TEMPLATE_SECTION_MAP = {
+  s1:  { rows: [27, 28, 29, 30, 31, 32, 33], kategori: "J142" },
+  s2:  { rows: [39, 40, 41, 42],             kategori: "J143" },
+  s3:  { rows: [48, 49, 50],                 kategori: "J144" },
+  s4:  { rows: [56, 57, 58, 59, 60, 61, 62], kategori: "J145" },
+  s5:  { rows: [68, 69, 70, 71, 72, 73, 74], kategori: "J146" },
+  s6:  { rows: [80, 81, 82, 83, 84, 85],     kategori: "J147" },
+  s7:  { rows: [91, 92, 93, 94],             kategori: "J148" },
+  s8:  { rows: [103, 104, 105, 106, 107, 108, 109], kategori: "J149" },
+  s9:  { rows: [117, 118, 119, 120, 121, 122, 123], kategori: "J150" },
+  s10: { rows: [131, 132, 133, 134, 135, 136, 137], kategori: "J151" },
+};
+const KESIMPULAN_CELL = "B155";
+// Fill colors matching the app's classification flags (ARGB, no leading #).
+const KATEGORI_FILL = {
+  Typical:     { fill: "FF38A169", font: "FFFFFFFF", text: "🟢 Tipikal" },
+  Kemungkinan: { fill: "FFD69E2E", font: "FFFFFFFF", text: "🟡 Kemungkinan" },
+  Definitif:   { fill: "FFE53E3E", font: "FFFFFFFF", text: "🔴 Definitif" },
+};
 
 const SECTIONS = [
   {
@@ -238,6 +268,8 @@ export default function ANBAssessment() {
   const [submitting, setSubmitting] = useState(false);
   const [submitted, setSubmitted] = useState(false);
   const [submitError, setSubmitError] = useState("");
+  const [xlsxBusy, setXlsxBusy] = useState(false);
+  const [xlsxError, setXlsxError] = useState("");
 
   const setScore = useCallback((key, value) => {
     setScores(prev => ({ ...prev, [key]: value }));
@@ -317,6 +349,68 @@ export default function ANBAssessment() {
     a.download = `ANB_Assessment_${client.nama.replace(/\s+/g, "_")}_${client.tanggalAsesmen || date}.txt`;
     a.click();
     URL.revokeObjectURL(url);
+  }
+
+  // ── EXCEL TEMPLATE EXPORT ─────────────────────────────────────────────────
+  // Loads the bundled OT template, fills client data + per-item scores, and
+  // color-fills each Kategori cell (Tipikal/Kemungkinan/Definitif) to match the
+  // app's classification. Existing template formulas/formatting are preserved.
+  // Requires "exceljs" (npm i exceljs).
+  async function downloadExcelTemplate() {
+    setXlsxBusy(true);
+    setXlsxError("");
+    try {
+      const ExcelJS = (await import("exceljs")).default;
+      const buf = await (await fetch(templateUrl)).arrayBuffer();
+      const wb = new ExcelJS.Workbook();
+      await wb.xlsx.load(buf);
+      const ws = wb.worksheets[0];
+
+      // Client data
+      Object.entries(TEMPLATE_CLIENT_CELLS).forEach(([key, cell]) => {
+        ws.getCell(cell).value = client[key] || "";
+      });
+
+      // Per-item scores + Kategori color
+      SECTIONS.forEach(section => {
+        const map = TEMPLATE_SECTION_MAP[section.id];
+        if (!map) return;
+        section.items.forEach((_, i) => {
+          const v = scores[`${section.id}_${i}`];
+          if (map.rows[i] != null) ws.getCell(`G${map.rows[i]}`).value = v ? parseInt(v) : null;
+        });
+        const total = sectionTotal(scores, section.id);
+        const flag = sectionFlag(total, section);
+        const style = flag && KATEGORI_FILL[flag.label];
+        if (style) {
+          const cell = ws.getCell(map.kategori);
+          // Break the shared-style reference so coloring one Kategori cell
+          // doesn't bleed into the others (ExcelJS shares style records).
+          cell.style = JSON.parse(JSON.stringify(cell.style || {}));
+          cell.value = style.text; // correct category value (overrides template's inverted formula)
+          cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: style.fill } };
+          cell.font = { bold: true, color: { argb: style.font } };
+          cell.alignment = { horizontal: "center", vertical: "center" };
+        }
+      });
+
+      // Kesimpulan
+      if (kesimpulan) ws.getCell(KESIMPULAN_CELL).value = kesimpulan;
+
+      const out = await wb.xlsx.writeBuffer();
+      const dateStr = new Date().toLocaleDateString("id-ID", { day: "2-digit", month: "long", year: "numeric" });
+      const blob = new Blob([out], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `ANB_Assessment_${(client.nama || "klien").replace(/\s+/g, "_")}_${client.tanggalAsesmen || dateStr}.xlsx`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setXlsxError("Gagal membuat file Excel. Pastikan paket 'exceljs' terpasang (npm i exceljs) di environment tempat aplikasi dijalankan.");
+    } finally {
+      setXlsxBusy(false);
+    }
   }
 
   // ── SUBMIT ──────────────────────────────────────────────────────────────────
@@ -654,23 +748,35 @@ export default function ANBAssessment() {
                 ⚠️ {submitError}
               </div>
             )}
+            {xlsxError && (
+              <div style={{ background: "#FFF5F5", border: "1.5px solid #FC8181", borderRadius: 8, padding: "12px 16px", fontSize: 13, color: "#C53030" }}>
+                ⚠️ {xlsxError}
+              </div>
+            )}
             <div style={{ display: "flex", gap: 12 }}>
               <button
                 onClick={generatePDF}
-                style={{ flex: 1, background: "#2B6CB0", color: "#fff", border: "none", borderRadius: 10, padding: "14px 20px", fontSize: 14, fontWeight: 700, cursor: "pointer" }}
+                style={{ flex: 1, background: "#EDF2F7", color: "#2D3748", border: "none", borderRadius: 10, padding: "14px 20px", fontSize: 14, fontWeight: 700, cursor: "pointer" }}
               >
-                📄 Download Laporan
+                📄 Laporan (.txt)
               </button>
               <button
-                onClick={handleSubmit}
-                disabled={submitting}
-                style={{ flex: 2, background: submitting ? "#A0AEC0" : "#276749", color: "#fff", border: "none", borderRadius: 10, padding: "14px 20px", fontSize: 15, fontWeight: 700, cursor: submitting ? "not-allowed" : "pointer", boxShadow: "0 2px 12px rgba(39,103,73,0.2)", transition: "background 0.15s" }}
+                onClick={downloadExcelTemplate}
+                disabled={xlsxBusy}
+                style={{ flex: 1, background: xlsxBusy ? "#A0AEC0" : "#2B6CB0", color: "#fff", border: "none", borderRadius: 10, padding: "14px 20px", fontSize: 14, fontWeight: 700, cursor: xlsxBusy ? "not-allowed" : "pointer" }}
               >
-                {submitting ? "Menyimpan..." : "✅ Simpan ke Google Sheets + Download"}
+                {xlsxBusy ? "Membuat..." : "📊 Excel (Form)"}
               </button>
             </div>
+            <button
+              onClick={handleSubmit}
+              disabled={submitting}
+              style={{ width: "100%", background: submitting ? "#A0AEC0" : "#276749", color: "#fff", border: "none", borderRadius: 10, padding: "14px 20px", fontSize: 15, fontWeight: 700, cursor: submitting ? "not-allowed" : "pointer", boxShadow: "0 2px 12px rgba(39,103,73,0.2)", transition: "background 0.15s" }}
+            >
+              {submitting ? "Menyimpan..." : "✅ Simpan ke Google Sheets + Download Laporan"}
+            </button>
             <p style={{ fontSize: 12, color: "#A0AEC0", textAlign: "center", margin: 0 }}>
-              Data terkirim ke Google Sheets. Laporan (.txt) otomatis terdownload — upload ke Drive folder klien yang sesuai.
+              "Excel (Form)" mengunduh file .xlsx sesuai template ANB — data & skor terisi, sel Kategori diwarnai sesuai klasifikasi.
             </p>
           </div>
         )}
