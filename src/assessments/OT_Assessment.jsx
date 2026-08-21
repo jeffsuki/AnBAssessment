@@ -1,4 +1,5 @@
 import { useState, useCallback } from "react";
+import JSZip from "jszip";
 import templateUrl from "./ot_template.xlsx?url";
 
 // ── DATA ──────────────────────────────────────────────────────────────────────
@@ -33,12 +34,15 @@ const TEMPLATE_SECTION_MAP = {
   s10: { rows: [131, 132, 133, 134, 135, 136, 137], kategori: "J151" },
 };
 const KESIMPULAN_CELL = "B155";
-// Fill colors matching the app's classification flags (ARGB, no leading #).
-const KATEGORI_FILL = {
-  Typical:     { fill: "FF38A169", font: "FFFFFFFF", text: "Tipikal" },
-  Kemungkinan: { fill: "FFD69E2E", font: "FFFFFFFF", text: "Kemungkinan" },
-  Definitif:   { fill: "FFE53E3E", font: "FFFFFFFF", text: "Definitif" },
+// Category label + fill (ARGB rgb, no leading #) matching the app's flags.
+// Injected directly into styles.xml via a surgical zip edit so the workbook is
+// never rewritten by a library that could corrupt it.
+const KATEGORI = {
+  Typical:     { text: "Tipikal",     rgb: "FF38A169" },
+  Kemungkinan: { text: "Kemungkinan", rgb: "FFD69E2E" },
+  Definitif:   { text: "Definitif",   rgb: "FFE53E3E" },
 };
+const KATEGORI_ORDER = ["Typical", "Kemungkinan", "Definitif"];
 
 const SECTIONS = [
   {
@@ -352,67 +356,99 @@ export default function ANBAssessment() {
   }
 
   // ── EXCEL TEMPLATE EXPORT ─────────────────────────────────────────────────
-  // Loads the bundled OT template, fills client data + per-item scores, and
-  // color-fills each Kategori cell (Tipikal/Kemungkinan/Definitif) to match the
-  // app's classification. Existing template formulas/formatting are preserved.
-  // Requires "exceljs" (npm i exceljs).
+  // Fills the bundled template by surgically editing the cells inside the xlsx
+  // zip (sheet1.xml values + styles.xml fills for the Kategori cells). The
+  // workbook is NEVER rewritten by a spreadsheet library, so nothing that Excel
+  // would reject is introduced — every other byte of the template is preserved.
+  // Requires "jszip" (npm i jszip).
   async function downloadExcelTemplate() {
     setXlsxBusy(true);
     setXlsxError("");
     try {
-      const ExcelJS = (await import("exceljs")).default;
       const resp = await fetch(templateUrl);
       if (!resp.ok) throw new Error("template fetch failed: " + resp.status);
       const buf = await resp.arrayBuffer();
-      // A valid .xlsx is a zip; guard against an HTML/404 body being loaded.
       const sig = new Uint8Array(buf.slice(0, 2));
       if (sig[0] !== 0x50 || sig[1] !== 0x4b) throw new Error("template is not a valid xlsx");
-      const wb = new ExcelJS.Workbook();
-      await wb.xlsx.load(buf);
-      const ws = wb.worksheets[0];
 
-      // Client data
-      Object.entries(TEMPLATE_CLIENT_CELLS).forEach(([key, cell]) => {
-        ws.getCell(cell).value = client[key] || "";
+      const zip = await JSZip.loadAsync(buf);
+      let sheet = await zip.file("xl/worksheets/sheet1.xml").async("string");
+      let styles = await zip.file("xl/styles.xml").async("string");
+
+      const esc = s => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      // Replace one cell's content, preserving its existing style index (s="..").
+      const setCell = (ref, inner, extraAttr = "") => {
+        const re = new RegExp(`<c r="${ref}"([^>]*?)(?:/>|>[\\s\\S]*?</c>)`);
+        sheet = sheet.replace(re, (m, attrs) => {
+          const s = (attrs.match(/\ss="\d+"/) || [""])[0];
+          return `<c r="${ref}"${s}${extraAttr}>${inner}</c>`;
+        });
+      };
+      const setNumber = (ref, num) => setCell(ref, `<v>${num}</v>`);
+      const setString = (ref, text) => setCell(ref, `<is><t xml:space="preserve">${esc(text)}</t></is>`, ` t="inlineStr"`);
+
+      // ── styles.xml: add 3 solid fills + 3 cellXfs cloned from the J-cell style ──
+      // Base J-cell xf is index 6 in this template; new fills append after the
+      // existing 6, new xfs append after the existing 63.
+      const baseXf = '<xf numFmtId="0" fontId="1" fillId="0" borderId="12" applyAlignment="1" pivotButton="0" quotePrefix="0" xfId="0"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>';
+      const fillCount = parseInt((styles.match(/<fills count="(\d+)">/) || [])[1] || "6", 10);
+      const xfCount = parseInt((styles.match(/<cellXfs count="(\d+)">/) || [])[1] || "63", 10);
+      const styleIndexFor = {};
+      let newFills = "", newXfs = "";
+      KATEGORI_ORDER.forEach((label, i) => {
+        const rgb = KATEGORI[label].rgb;
+        const fillId = fillCount + i;
+        const xfIndex = xfCount + i;
+        newFills += `<fill><patternFill patternType="solid"><fgColor rgb="${rgb}"/><bgColor rgb="${rgb}"/></patternFill></fill>`;
+        newXfs += baseXf.replace('fillId="0"', `fillId="${fillId}"`);
+        styleIndexFor[label] = xfIndex;
       });
+      styles = styles
+        .replace(/<fills count="\d+">/, `<fills count="${fillCount + 3}">`)
+        .replace(/<\/fills>/, newFills + "</fills>")
+        .replace(/<cellXfs count="\d+">/, `<cellXfs count="${xfCount + 3}">`)
+        .replace(/<\/cellXfs>/, newXfs + "</cellXfs>");
 
-      // Per-item scores + Kategori color
+      // ── sheet1.xml: client, scores, kategori (value + colored style), kesimpulan ──
+      Object.entries(TEMPLATE_CLIENT_CELLS).forEach(([key, ref]) => {
+        if (client[key]) setString(ref, client[key]);
+      });
       SECTIONS.forEach(section => {
         const map = TEMPLATE_SECTION_MAP[section.id];
         if (!map) return;
         section.items.forEach((_, i) => {
           const v = scores[`${section.id}_${i}`];
-          if (map.rows[i] != null) ws.getCell(`G${map.rows[i]}`).value = v ? parseInt(v) : null;
+          if (map.rows[i] != null && v) setNumber(`G${map.rows[i]}`, parseInt(v));
         });
         const total = sectionTotal(scores, section.id);
         const flag = sectionFlag(total, section);
-        const style = flag && KATEGORI_FILL[flag.label];
-        if (style) {
-          const cell = ws.getCell(map.kategori);
-          // Break the shared-style reference so coloring one Kategori cell
-          // doesn't bleed into the others (ExcelJS shares style records).
-          cell.style = JSON.parse(JSON.stringify(cell.style || {}));
-          cell.value = style.text; // correct category value (overrides template's inverted formula)
-          cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: style.fill } };
-          cell.font = { bold: true, color: { argb: style.font } };
-          cell.alignment = { horizontal: "center", vertical: "center" };
+        const label = flag && (flag.label === "Typical" ? "Typical" : flag.label);
+        if (label && KATEGORI[label]) {
+          // set value + swap the style index to the colored xf
+          const styleIdx = styleIndexFor[label];
+          const re = new RegExp(`<c r="${map.kategori}"[^>]*?(?:/>|>[\\s\\S]*?</c>)`);
+          sheet = sheet.replace(re, `<c r="${map.kategori}" s="${styleIdx}" t="inlineStr"><is><t xml:space="preserve">${esc(KATEGORI[label].text)}</t></is></c>`);
         }
       });
+      if (kesimpulan) setString(KESIMPULAN_CELL, kesimpulan);
 
-      // Kesimpulan
-      if (kesimpulan) ws.getCell(KESIMPULAN_CELL).value = kesimpulan;
+      zip.file("xl/worksheets/sheet1.xml", sheet);
+      zip.file("xl/styles.xml", styles);
 
-      const out = await wb.xlsx.writeBuffer();
+      const outBlob = await zip.generateAsync({
+        type: "blob",
+        mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        compression: "DEFLATE",
+      });
       const dateStr = new Date().toLocaleDateString("id-ID", { day: "2-digit", month: "long", year: "numeric" });
-      const blob = new Blob([out], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
-      const url = URL.createObjectURL(blob);
+      const url = URL.createObjectURL(outBlob);
       const a = document.createElement("a");
       a.href = url;
       a.download = `ANB_Assessment_${(client.nama || "klien").replace(/\s+/g, "_")}_${client.tanggalAsesmen || dateStr}.xlsx`;
       a.click();
       URL.revokeObjectURL(url);
     } catch (err) {
-      setXlsxError("Gagal membuat file Excel. Pastikan paket 'exceljs' terpasang (npm i exceljs) di environment tempat aplikasi dijalankan.");
+      setXlsxError("Gagal membuat file Excel: " + (err && err.message ? err.message : "unknown"));
     } finally {
       setXlsxBusy(false);
     }
