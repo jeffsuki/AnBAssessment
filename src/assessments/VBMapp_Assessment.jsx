@@ -13,11 +13,13 @@ const SCALE = [
   { value: 1,   label: "1",  sub: "Tercapai", color: "#38A169" },
 ];
 
+// Colors follow the standard VB-MAPP Master Scoring Form convention.
+// Tes ke-4 has no official color in the standard (rarely reached in practice) — chosen freely.
 const TEST_ROUNDS = [
-  { value: 1, label: "Tes ke-1", color: "#E53E3E", half: "#FBB6B6" },
-  { value: 2, label: "Tes ke-2", color: "#D69E2E", half: "#FAE9B0" },
-  { value: 3, label: "Tes ke-3", color: "#2B6CB0", half: "#BEE3F8" },
-  { value: 4, label: "Tes ke-4", color: "#38A169", half: "#C6F6D5" },
+  { value: 1, label: "Tes ke-1", color: "#FF9900", half: "#FFD89E" },
+  { value: 2, label: "Tes ke-2", color: "#9BBB59", half: "#D9E5C0" },
+  { value: 3, label: "Tes ke-3", color: "#4F81BD", half: "#BCCFE6" },
+  { value: 4, label: "Tes ke-4", color: "#8064A2", half: "#CFC4DC" },
 ];
 
 // h = half-point criterion, f = full-point criterion (helper text for the scorer)
@@ -358,26 +360,23 @@ const CAP = {
 };
 
 // ── EESA (Early Echoic Skills Assessment — Barbara E. Esch) ───────────────────
-// Groups 1–4: X = 1 poin, / = ½ poin.  Group 5: X = 1 poin saja.
+// Semua grup: X = bisa (1 poin), kosong = tidak (0 poin). Tidak ada nilai parsial (½).
 // Total raw score otomatis mengisi seluruh milestone Echoic (L1 #1–5, L2 #6–10).
 const EESA_GROUPS = [
-  { id: "G1", name: "Group 1 — Suku kata sederhana & reduplikasi", half: true, note: "Target: vokal, diftong, konsonan p, b, m, n, h, w",
+  { id: "G1", name: "Group 1 — Suku kata sederhana & reduplikasi", note: "Target: vokal, diftong, konsonan p, b, m, n, h, w",
     items: ["ah","wow","bee","knee","oo","bye bye","hop","mama","papa","me","one","my","boo","no no","oh","moo","up","may","pop","too","we","boy","wa wa","toy","baa"] },
-  { id: "G2", name: "Group 2 — Kombinasi 2 suku kata", half: true, note: "Target: tambah konsonan k, g, t, d, f, y, ng",
+  { id: "G2", name: "Group 2 — Kombinasi 2 suku kata", note: "Target: tambah konsonan k, g, t, d, f, y, ng",
     items: ["baby","go eat","nighttime","bunny","my foot","yucky","window","funny","meow","kitty","bow wow","mommy","open","oh boy","yumm-o","potty","pay day","pokey","taco","foo-ey","hankie","too bad","cookie","puppy","icky","too hot","monkey","uh-oh","daddy","hot dog"] },
-  { id: "G3", name: "Group 3 — Kombinasi 3 suku kata", half: true, note: "",
+  { id: "G3", name: "Group 3 — Kombinasi 3 suku kata", note: "",
     items: ["tubby toy","banana","fee fi foe","yummy food","daddy up","in a boat","potato","go bye bye","fat doggy","goofy goat","hey me too","my big toe","do high five","oh foo-ey","binky boo","one cookie","open up","peanut hat","tiny pan","peek a boo","teddy bear","doggy bone","funny king","a hiccup","how many","potty time","giddy-up","teepee boat","puppet game"] },
-  { id: "G4", name: "Group 4 — Prosodi: frasa lisan", half: true, note: "Model: tekankan suku kata bercetak tebal",
+  { id: "G4", name: "Group 4 — Prosodi: frasa lisan", note: "Model: tekankan suku kata bercetak tebal",
     items: ["no WAY","bug-a-BOO","ONE bunny","UH-oh","in a MIN-ute","MY mommy","TAKE it","bow-WOW","my MOM-my","BUG-a-boo"] },
-  { id: "G5", name: "Group 5 — Prosodi: konteks lain", half: false, note: "X = respon benar / hampir benar (1 poin). Tanpa ½.",
+  { id: "G5", name: "Group 5 — Prosodi: konteks lain", note: "",
     items: ["Pitch: menirukan variasi nada 1–2 baris lagu yang dikenal","Pitch: menirukan warble kontinu (sirene OO-oo-OO-oo-OO)","Loudness: menirukan bisikan","Loudness: menirukan suara pelan/keras (bye-bye vs. BYE-BYE)","Duration: menahan “ahh” selama 3 detik secara ekoik"] },
 ];
 const eesaKey = (g, i) => `EESA_${g}_${i}`;
 function eesaGroupScore(eesa, g) {
-  return g.items.reduce((s, _, i) => {
-    const v = eesa[eesaKey(g.id, i)];
-    return s + (v === "x" ? 1 : v === "h" && g.half ? 0.5 : 0);
-  }, 0);
+  return g.items.reduce((s, _, i) => s + (eesa[eesaKey(g.id, i)] === "x" ? 1 : 0), 0);
 }
 const eesaTotal = eesa => EESA_GROUPS.reduce((s, g) => s + eesaGroupScore(eesa, g), 0);
 
@@ -508,26 +507,35 @@ function answeredOf(levelId, code, item, scores, eesa) {
   return capAnswered(getCap(levelId, code, item.n), scores[keyFor(levelId, code, item.n)]);
 }
 
-const domKey = (levelId, code) => `${levelId}_${code}`;
-const isExcluded = (levelId, domain, invalid) => domain.disabled || !!(invalid && invalid[domKey(levelId, domain.code)]);
-const activeDomains = (level, invalid) => level.domains.filter(d => !isExcluded(level.id, d, invalid));
+// isItemInvalid: per-milestone manual "tidak dapat diuji" flag, keyed the same
+// way as `scores` (levelId_code_n). Structural exclusion (Social/Group L2 & L3)
+// stays on `domain.disabled` and is separate — that always applies to everyone.
+const isItemInvalid = (levelId, code, n, invalidItems) => !!(invalidItems && invalidItems[keyFor(levelId, code, n)]);
+const itemExcluded = (levelId, domain, item, invalidItems) => domain.disabled || isItemInvalid(levelId, domain.code, item.n, invalidItems);
 
-function domainTotal(scores, levelId, domain, eesa) {
-  return domain.items.reduce((sum, it) => sum + scoreOf(levelId, domain.code, it, scores, eesa), 0);
+function domainItems(levelId, domain, invalidItems) {
+  if (domain.disabled) return [];
+  return domain.items.filter(it => !isItemInvalid(levelId, domain.code, it.n, invalidItems));
 }
-function levelTotal(scores, level, eesa, invalid) {
-  return activeDomains(level, invalid).reduce((sum, d) => sum + domainTotal(scores, level.id, d, eesa), 0);
+function domainTotal(scores, levelId, domain, eesa, invalidItems) {
+  return domainItems(levelId, domain, invalidItems).reduce((sum, it) => sum + scoreOf(levelId, domain.code, it, scores, eesa), 0);
 }
-function levelMax(level, invalid) {
-  return activeDomains(level, invalid).reduce((sum, d) => sum + d.items.length, 0);
+function domainMax(levelId, domain, invalidItems) {
+  return domainItems(levelId, domain, invalidItems).length;
 }
-function domainComplete(scores, levelId, domain, eesa) {
-  return domain.items.every(it => answeredOf(levelId, domain.code, it, scores, eesa));
+function levelTotal(scores, level, eesa, invalidItems) {
+  return level.domains.reduce((sum, d) => sum + domainTotal(scores, level.id, d, eesa, invalidItems), 0);
 }
-function grandMax(invalid) {
-  return LEVELS.reduce((s, lv) => s + levelMax(lv, invalid), 0);
+function levelMax(level, invalidItems) {
+  return level.domains.reduce((sum, d) => sum + domainMax(level.id, d, invalidItems), 0);
 }
-const GRAND_MAX_FULL = LEVELS.reduce((s, lv) => s + levelMax(lv), 0); // before any runtime exclusions
+function domainComplete(scores, levelId, domain, eesa, invalidItems) {
+  return domain.items.every(it => isItemInvalid(levelId, domain.code, it.n, invalidItems) || answeredOf(levelId, domain.code, it, scores, eesa));
+}
+function grandMax(invalidItems) {
+  return LEVELS.reduce((s, lv) => s + levelMax(lv, invalidItems), 0);
+}
+const GRAND_MAX_FULL = LEVELS.reduce((s, lv) => s + levelMax(lv, {}), 0); // before any manual exclusions
 
 const scoreColor = s => (s >= 1 ? "#38A169" : s >= 0.5 ? "#D69E2E" : "#E53E3E");
 const scoreLabel = s => (s >= 1 ? "1" : s >= 0.5 ? "½" : "0");
@@ -684,13 +692,13 @@ const GRID_ROWS = [15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1];
 const levelOf = n => (n <= 5 ? "L1" : n <= 10 ? "L2" : "L3");
 const BAND_TINT = { L1: "#EBF8FF", L2: "#FEFCBF", L3: "#FED7D7" };
 
-function gridCell(code, n, scores, eesa, invalid) {
+function gridCell(code, n, scores, eesa, invalidItems) {
   const lid = levelOf(n);
   const lv = LEVELS.find(l => l.id === lid);
   const dom = lv && lv.domains.find(d => d.code === code);
   const item = dom && dom.items.find(it => it.n === n);
   if (!item) return { exists: false };
-  if (isExcluded(lid, dom, invalid)) return { exists: true, disabled: true };
+  if (itemExcluded(lid, dom, item, invalidItems)) return { exists: true, disabled: true };
   return {
     exists: true,
     score: scoreOf(lid, code, item, scores, eesa),
@@ -698,7 +706,7 @@ function gridCell(code, n, scores, eesa, invalid) {
   };
 }
 
-function MilestoneGrid({ scores, roundFull, roundHalf, eesa, invalid }) {
+function MilestoneGrid({ scores, roundFull, roundHalf, eesa, invalidItems }) {
   const CELL = 26, LABEL = 30, HEAD = 78;
   const HATCH = "repeating-linear-gradient(45deg,#F7FAFC,#F7FAFC 3px,#EDF2F7 3px,#EDF2F7 6px)";
   return (
@@ -725,7 +733,7 @@ function MilestoneGrid({ scores, roundFull, roundHalf, eesa, invalid }) {
               <tr key={n}>
                 <td style={{ width: LABEL, textAlign: "center", fontSize: 11, fontWeight: 700, color: "#4A5568", background: BAND_TINT[levelOf(n)], border: "1px solid #E2E8F0" }}>{n}</td>
                 {GRID_COLS.map(code => {
-                  const c = gridCell(code, n, scores, eesa, invalid);
+                  const c = gridCell(code, n, scores, eesa, invalidItems);
                   let bg = "#fff";
                   if (!c.exists) bg = "#E2E8F0";                       // not assessed at this level
                   else if (c.disabled) bg = HATCH;                     // excluded domain
@@ -765,7 +773,7 @@ export default function VBMappAssessment() {
   const [testRound, setTestRound] = useState(1);
   const [scores, setScores] = useState({});
   const [eesa, setEesa] = useState({});
-  const [invalidDomains, setInvalidDomains] = useState({}); // { "L1_Social": true }
+  const [invalidItems, setInvalidItems] = useState({}); // { "L1_Social_1": true }
   const [notes, setNotes] = useState({});
   const [kesimpulan, setKesimpulan] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -775,8 +783,8 @@ export default function VBMappAssessment() {
   const [xlsxError, setXlsxError] = useState("");
 
   const setScore = useCallback((k, v) => setScores(prev => ({ ...prev, [k]: v })), []);
-  const toggleInvalid = useCallback((levelId, code) => setInvalidDomains(prev => {
-    const key = domKey(levelId, code);
+  const toggleItemInvalid = useCallback((levelId, code, n) => setInvalidItems(prev => {
+    const key = keyFor(levelId, code, n);
     const next = { ...prev };
     if (next[key]) delete next[key]; else next[key] = true;
     return next;
@@ -789,10 +797,10 @@ export default function VBMappAssessment() {
   }), []);
 
   const grandTotal = useMemo(
-    () => LEVELS.reduce((s, lv) => s + levelTotal(scores, lv, eesa, invalidDomains), 0),
-    [scores, eesa, invalidDomains]
+    () => LEVELS.reduce((s, lv) => s + levelTotal(scores, lv, eesa, invalidItems), 0),
+    [scores, eesa, invalidItems]
   );
-  const GRAND_MAX = useMemo(() => grandMax(invalidDomains), [invalidDomains]);
+  const GRAND_MAX = useMemo(() => grandMax(invalidItems), [invalidItems]);
   const roundColor = TEST_ROUNDS.find(r => r.value === testRound)?.color || "#2B6CB0";
   const roundHalf = TEST_ROUNDS.find(r => r.value === testRound)?.half || "#BEE3F8";
 
@@ -818,10 +826,10 @@ export default function VBMappAssessment() {
     L.push("REKAP SKOR PER LEVEL");
     L.push("------------------------------------------------------------");
     LEVELS.forEach(lv => {
-      L.push(`${lv.label} (${lv.range})  ${levelTotal(scores, lv, eesa, invalidDomains)} / ${levelMax(lv, invalidDomains)}`);
+      L.push(`${lv.label} (${lv.range})  ${levelTotal(scores, lv, eesa, invalidItems)} / ${levelMax(lv, invalidItems)}`);
       lv.domains.forEach(d => {
-        if (isExcluded(lv.id, d, invalidDomains)) { L.push(`   ${d.name.padEnd(26)}   -- (${d.disabled ? "dikecualikan dari penilaian" : "ditandai tidak dapat diuji"})`); return; }
-        L.push(`   ${d.name.padEnd(26)} ${String(domainTotal(scores, lv.id, d, eesa)).padStart(4)} / ${d.items.length}`);
+        if (d.disabled) { L.push(`   ${d.name.padEnd(26)}   -- (dikecualikan dari penilaian)`); return; }
+        L.push(`   ${d.name.padEnd(26)} ${String(domainTotal(scores, lv.id, d, eesa, invalidItems)).padStart(4)} / ${domainMax(lv.id, d, invalidItems)}`);
       });
     });
     L.push("------------------------------------------------------------");
@@ -838,9 +846,10 @@ export default function VBMappAssessment() {
       L.push("");
       L.push(`### ${lv.label} — ${lv.range}`);
       lv.domains.forEach(d => {
-        if (isExcluded(lv.id, d, invalidDomains)) { L.push(`\n${d.code} — ${d.name}  [${d.disabled ? "DIKECUALIKAN — tidak dinilai untuk semua client" : "TIDAK DAPAT DIUJI — ditandai tidak valid untuk client ini"}]`); return; }
-        L.push(`\n${d.code} — ${d.name}  [${domainTotal(scores, lv.id, d, eesa)}/${d.items.length}]`);
+        if (d.disabled) { L.push(`\n${d.code} — ${d.name}  [DIKECUALIKAN — tidak dinilai untuk semua client]`); return; }
+        L.push(`\n${d.code} — ${d.name}  [${domainTotal(scores, lv.id, d, eesa, invalidItems)}/${domainMax(lv.id, d, invalidItems)}]`);
         d.items.forEach(it => {
+          if (isItemInvalid(lv.id, d.code, it.n, invalidItems)) { L.push(`  ${String(it.n).padStart(2)}. (—)  ${it.text}  [TIDAK DAPAT DIUJI]`); return; }
           const sc = scoreOf(lv.id, d.code, it, scores, eesa);
           const data = isEchoic(d.code) ? `Skor EESA: ${eesaTotal(eesa)}` : capDisplay(getCap(lv.id, d.code, it.n), scores[keyFor(lv.id, d.code, it.n)]);
           L.push(`  ${String(it.n).padStart(2)}. (${sc})  ${it.text}`);
@@ -927,7 +936,7 @@ export default function VBMappAssessment() {
         GRID_COLS.forEach((code, ci) => {
           const cell = row.getCell(ci + 2);
           cell.border = { top: { style: "thin", color: { argb: "FFE2E8F0" } }, bottom: { style: "thin", color: { argb: "FFE2E8F0" } }, left: { style: "thin", color: { argb: "FFE2E8F0" } }, right: { style: "thin", color: { argb: "FFE2E8F0" } } };
-          const c = gridCell(code, n, scores, eesa, invalidDomains);
+          const c = gridCell(code, n, scores, eesa, invalidItems);
           if (!c.exists) {
             cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: argb("#E2E8F0") } };
           } else if (c.disabled) {
@@ -966,7 +975,7 @@ export default function VBMappAssessment() {
         wsEesa.addRow([g.name]).font = { bold: true };
         g.items.forEach((word, i) => {
           const v = eesa[eesaKey(g.id, i)];
-          wsEesa.addRow([word, v === "x" ? "X" : v === "h" ? "/" : ""]);
+          wsEesa.addRow([word, v === "x" ? "X" : ""]);
         });
         wsEesa.addRow([`Sub-total ${g.id}`, eesaGroupScore(eesa, g)]).font = { bold: true };
         wsEesa.addRow([]);
@@ -980,10 +989,11 @@ export default function VBMappAssessment() {
       wsDetail.addRow(["Level", "Domain", "No.", "Deskripsi Milestone", "Skor", "Respon Tercatat"]).font = { bold: true };
       LEVELS.forEach(lv => {
         lv.domains.forEach(d => {
-          const excluded = isExcluded(lv.id, d, invalidDomains);
           d.items.forEach(it => {
-            const sc = excluded ? "—" : scoreOf(lv.id, d.code, it, scores, eesa);
-            const data = excluded ? (d.disabled ? "dikecualikan" : "tidak dapat diuji")
+            const invalid = isItemInvalid(lv.id, d.code, it.n, invalidItems);
+            const sc = (d.disabled || invalid) ? "—" : scoreOf(lv.id, d.code, it, scores, eesa);
+            const data = d.disabled ? "dikecualikan"
+              : invalid ? "tidak dapat diuji"
               : isEchoic(d.code) ? `Skor EESA: ${eesaTotal(eesa)}`
               : capDisplay(getCap(lv.id, d.code, it.n), scores[keyFor(lv.id, d.code, it.n)]);
             wsDetail.addRow([lv.label, d.name, it.n, it.text, sc, data]);
@@ -995,7 +1005,7 @@ export default function VBMappAssessment() {
       const wsSum = wb.addWorksheet("Ringkasan");
       wsSum.columns = [{ width: 30 }, { width: 14 }];
       wsSum.addRow(["Level", "Skor"]).font = { bold: true };
-      LEVELS.forEach(lv => wsSum.addRow([`${lv.label} (${lv.range})`, `${levelTotal(scores, lv, eesa, invalidDomains)} / ${levelMax(lv, invalidDomains)}`]));
+      LEVELS.forEach(lv => wsSum.addRow([`${lv.label} (${lv.range})`, `${levelTotal(scores, lv, eesa, invalidItems)} / ${levelMax(lv, invalidItems)}`]));
       wsSum.addRow([]);
       wsSum.addRow(["TOTAL MILESTONES", `${grandTotal} / ${GRAND_MAX}`]).font = { bold: true, size: 12 };
       wsSum.addRow([]);
@@ -1030,19 +1040,20 @@ export default function VBMappAssessment() {
     EESA_GROUPS.forEach(g => { row[`EESA_${g.id}_total`] = eesaGroupScore(eesa, g); });
     LEVELS.forEach(lv => {
       lv.domains.forEach(d => {
-        if (isExcluded(lv.id, d, invalidDomains)) {
-          row[`${lv.id}_${d.code}_total`] = d.disabled ? "dikecualikan" : "tidak_dapat_diuji";
+        if (d.disabled) {
+          row[`${lv.id}_${d.code}_total`] = "dikecualikan";
           return;
         }
         d.items.forEach(it => {
           const kk = keyFor(lv.id, d.code, it.n);
+          if (isItemInvalid(lv.id, d.code, it.n, invalidItems)) { row[kk] = "tidak_dapat_diuji"; row[`${kk}_data`] = ""; return; }
           row[kk] = scoreOf(lv.id, d.code, it, scores, eesa);
           row[`${kk}_data`] = isEchoic(d.code) ? eesaTotal(eesa) : capDisplay(getCap(lv.id, d.code, it.n), scores[kk]);
         });
-        row[`${lv.id}_${d.code}_total`] = domainTotal(scores, lv.id, d, eesa);
+        row[`${lv.id}_${d.code}_total`] = domainTotal(scores, lv.id, d, eesa, invalidItems);
         row[`${lv.id}_${d.code}_catatan`] = notes[`${lv.id}_${d.code}`] || "";
       });
-      row[`${lv.id}_total`] = levelTotal(scores, lv, eesa, invalidDomains);
+      row[`${lv.id}_total`] = levelTotal(scores, lv, eesa, invalidItems);
     });
     row.grand_total = grandTotal;
     row.grand_max = GRAND_MAX;
@@ -1067,7 +1078,7 @@ export default function VBMappAssessment() {
 
   function resetForm() {
     setClient({ nama: "", noClient: "", usia: "", tanggalLahir: "", jenisKelamin: "", diagnosis: "", asesor: "", tanggalAsesmen: "" });
-    setScores({}); setEesa({}); setInvalidDomains({}); setNotes({}); setKesimpulan(""); setTestRound(1);
+    setScores({}); setEesa({}); setInvalidItems({}); setNotes({}); setKesimpulan(""); setTestRound(1);
     setSubmitted(false); setSubmitError(""); setTab("client"); setDomainIdx(0);
   }
 
@@ -1115,7 +1126,7 @@ export default function VBMappAssessment() {
               style={{ padding: "11px 16px", border: "none", borderBottom: active ? "3px solid #2B6CB0" : "3px solid transparent", background: "transparent", cursor: "pointer", fontSize: 13, fontWeight: 700, color: active ? "#2B6CB0" : "#718096", whiteSpace: "nowrap", display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
               <span>{t.label}</span>
               {t.id === "eesa" && <span style={{ fontSize: 10, fontWeight: 600, color: active ? "#2B6CB0" : "#A0AEC0" }}>{eesaTotal(eesa)}</span>}
-              {lvl && <span style={{ fontSize: 10, fontWeight: 600, color: active ? "#2B6CB0" : "#A0AEC0" }}>{levelTotal(scores, lvl, eesa, invalidDomains)}/{levelMax(lvl, invalidDomains)}</span>}
+              {lvl && <span style={{ fontSize: 10, fontWeight: 600, color: active ? "#2B6CB0" : "#A0AEC0" }}>{levelTotal(scores, lvl, eesa, invalidItems)}/{levelMax(lvl, invalidItems)}</span>}
             </button>
           );
         })}
@@ -1179,8 +1190,7 @@ export default function VBMappAssessment() {
               <span style={{ fontSize: 12, color: "#A0AEC0" }}>Barbara E. Esch, Ph.D., BCBA, CCC-SLP</span>
             </div>
             <div style={{ background: "#FFF7ED", border: "1px solid #FEC89A", borderRadius: 8, padding: "10px 14px", margin: "12px 0 18px", fontSize: 12, color: "#7C2D12", lineHeight: 1.5 }}>
-              <b>Grup 1–4:</b> tap <b>X</b> = respon benar (1 poin), tap <b>/</b> = respon dikenali tapi konsonan/suku kata salah atau kurang (½ poin), kosongkan = tidak ada respon (0 poin).<br />
-              <b>Grup 5:</b> hanya <b>X</b> = respon benar (1 poin); tanpa nilai ½.<br />
+              Tap <b>X</b> = bisa (1 poin). Kosongkan = tidak bisa (0 poin). Tidak ada nilai parsial.<br />
               Skor ini otomatis mengisi seluruh milestone <b>Echoic</b> pada Level 1 (#1–5) dan Level 2 (#6–10).
             </div>
 
@@ -1200,11 +1210,6 @@ export default function VBMappAssessment() {
                         <button onClick={() => setEesaCell(g.id, i, "x")}
                           style={{ width: 30, height: 26, borderRadius: 6, fontSize: 12, fontWeight: 800, cursor: "pointer",
                             border: v === "x" ? "1.5px solid #38A169" : "1.5px solid #CBD5E0", background: v === "x" ? "#38A169" : "#fff", color: v === "x" ? "#fff" : "#A0AEC0" }}>X</button>
-                        {g.half && (
-                          <button onClick={() => setEesaCell(g.id, i, "h")}
-                            style={{ width: 30, height: 26, borderRadius: 6, fontSize: 12, fontWeight: 800, cursor: "pointer",
-                              border: v === "h" ? "1.5px solid #D69E2E" : "1.5px solid #CBD5E0", background: v === "h" ? "#D69E2E" : "#fff", color: v === "h" ? "#fff" : "#A0AEC0" }}>/</button>
-                        )}
                       </div>
                     );
                   })}
@@ -1226,33 +1231,25 @@ export default function VBMappAssessment() {
             <div style={{ display: "flex", gap: 6, overflowX: "auto", paddingBottom: 12, marginBottom: 16, borderBottom: "1px solid #E2E8F0", WebkitOverflowScrolling: "touch" }}>
               {activeLevel.domains.map((d, i) => {
                 const active = i === domainIdx;
-                const excluded = isExcluded(activeLevel.id, d, invalidDomains);
-                const complete = !excluded && domainComplete(scores, activeLevel.id, d, eesa);
+                const disabled = d.disabled;
+                const complete = !disabled && domainComplete(scores, activeLevel.id, d, eesa, invalidItems);
                 return (
                   <button key={d.code} onClick={() => setDomainIdx(i)}
-                    style={{ padding: "6px 12px", borderRadius: 20, border: active ? "1.5px solid #2B6CB0" : "1.5px solid #E2E8F0", background: excluded ? "#F7FAFC" : active ? "#EBF8FF" : "#fff", color: excluded ? "#CBD5E0" : active ? "#2B6CB0" : "#718096", fontSize: 12, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap", display: "flex", alignItems: "center", gap: 5 }}>
+                    style={{ padding: "6px 12px", borderRadius: 20, border: active ? "1.5px solid #2B6CB0" : "1.5px solid #E2E8F0", background: disabled ? "#F7FAFC" : active ? "#EBF8FF" : "#fff", color: disabled ? "#CBD5E0" : active ? "#2B6CB0" : "#718096", fontSize: 12, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap", display: "flex", alignItems: "center", gap: 5 }}>
                     {d.code}
-                    {excluded ? <span style={{ fontSize: 10 }}>⊘</span> : <span style={{ fontSize: 10, color: complete ? "#38A169" : "#CBD5E0" }}>{complete ? "✓" : "•"}</span>}
+                    {disabled ? <span style={{ fontSize: 10 }}>⊘</span> : <span style={{ fontSize: 10, color: complete ? "#38A169" : "#CBD5E0" }}>{complete ? "✓" : "•"}</span>}
                   </button>
                 );
               })}
             </div>
 
-            {isExcluded(activeLevel.id, activeDomain, invalidDomains) ? (
+            {activeDomain.disabled ? (
               <div style={{ background: "#F7FAFC", border: "1.5px dashed #CBD5E0", borderRadius: 10, padding: "28px 20px", textAlign: "center" }}>
                 <div style={{ fontSize: 28, marginBottom: 8 }}>⊘</div>
                 <h2 style={{ fontSize: 16, fontWeight: 700, color: "#4A5568", margin: "0 0 6px" }}>{activeDomain.name} — Tidak Dinilai</h2>
                 <p style={{ fontSize: 13, color: "#A0AEC0", maxWidth: 420, margin: "0 auto" }}>
-                  {activeDomain.disabled
-                    ? "Domain ini dikecualikan dari asesmen untuk semua client. Total skor dan skor maksimum level secara otomatis disesuaikan."
-                    : "Domain ini ditandai tidak dapat diuji untuk client ini. Total skor dan skor maksimum level secara otomatis disesuaikan."}
+                  Domain ini dikecualikan dari asesmen untuk semua client. Total skor dan skor maksimum level secara otomatis disesuaikan.
                 </p>
-                {!activeDomain.disabled && (
-                  <button onClick={() => toggleInvalid(activeLevel.id, activeDomain.code)}
-                    style={{ marginTop: 16, background: "#2B6CB0", color: "#fff", border: "none", borderRadius: 8, padding: "9px 20px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
-                    ↺ Aktifkan Kembali Domain Ini
-                  </button>
-                )}
               </div>
             ) : (<>
 
@@ -1261,14 +1258,8 @@ export default function VBMappAssessment() {
                 <span style={{ fontSize: 11, fontWeight: 700, color: "#2B6CB0", letterSpacing: 1, textTransform: "uppercase" }}>{activeLevel.label} · {activeDomain.code}</span>
                 <h2 style={{ fontSize: 17, fontWeight: 700, color: "#1A202C", margin: "2px 0 0" }}>{activeDomain.name}</h2>
               </div>
-              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <button onClick={() => toggleInvalid(activeLevel.id, activeDomain.code)}
-                  style={{ background: "#fff", color: "#A0AEC0", border: "1.5px solid #E2E8F0", borderRadius: 8, padding: "6px 12px", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
-                  ⊘ Tidak dapat diuji
-                </button>
-                <div style={{ background: "#EBF8FF", borderRadius: 8, padding: "4px 12px", fontSize: 13, fontWeight: 700, color: "#2B6CB0" }}>
-                  {domainTotal(scores, activeLevel.id, activeDomain, eesa)} / {activeDomain.items.length}
-                </div>
+              <div style={{ background: "#EBF8FF", borderRadius: 8, padding: "4px 12px", fontSize: 13, fontWeight: 700, color: "#2B6CB0" }}>
+                {domainTotal(scores, activeLevel.id, activeDomain, eesa, invalidItems)} / {domainMax(activeLevel.id, activeDomain, invalidItems)}
               </div>
             </div>
 
@@ -1279,17 +1270,30 @@ export default function VBMappAssessment() {
             <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
               {activeDomain.items.map((it, i) => {
                 const exNote = EX[keyFor(activeLevel.id, activeDomain.code, it.n)];
+                const invalid = isItemInvalid(activeLevel.id, activeDomain.code, it.n, invalidItems);
                 return (
                   <div key={it.n} style={{ paddingBottom: 18, borderBottom: i < activeDomain.items.length - 1 ? "1px solid #F7FAFC" : "none" }}>
-                    <div style={{ fontSize: 13, color: "#2D3748", marginBottom: 4, lineHeight: 1.5, fontWeight: 500 }}>
-                      <span style={{ color: "#A0AEC0", fontWeight: 700, marginRight: 8 }}>{it.n}.</span>{it.text}
+                    <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 8, marginBottom: 4 }}>
+                      <div style={{ fontSize: 13, color: "#2D3748", lineHeight: 1.5, fontWeight: 500 }}>
+                        <span style={{ color: "#A0AEC0", fontWeight: 700, marginRight: 8 }}>{it.n}.</span>{it.text}
+                      </div>
+                      <button onClick={() => toggleItemInvalid(activeLevel.id, activeDomain.code, it.n)}
+                        style={{ flex: "none", background: invalid ? "#EDF2F7" : "#fff", color: invalid ? "#4A5568" : "#CBD5E0", border: "1.5px solid #E2E8F0", borderRadius: 6, padding: "3px 9px", fontSize: 10, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap" }}>
+                        ⊘ {invalid ? "Ditandai" : "Tidak dapat diuji"}
+                      </button>
                     </div>
-                    <div style={{ fontSize: 11, color: "#A0AEC0", marginBottom: exNote ? 3 : 10, paddingLeft: 22 }}>
-                      ½ = {it.h} &nbsp;·&nbsp; 1 = {it.f}
-                    </div>
-                    {exNote && <div style={{ fontSize: 11, color: "#B7791F", marginBottom: 10, paddingLeft: 22, fontStyle: "italic" }}>{exNote}</div>}
-                    <MilestoneInput levelId={activeLevel.id} code={activeDomain.code} item={it} scores={scores} setScore={setScore}
-                      eesa={eesa} goEesa={() => { setTab("eesa"); }} />
+                    {invalid ? (
+                      <div style={{ background: "#F7FAFC", border: "1px dashed #CBD5E0", borderRadius: 8, padding: "10px 12px", marginLeft: 22, fontSize: 12, color: "#A0AEC0" }}>
+                        Milestone ini ditandai tidak dapat diuji untuk client ini — tidak dihitung dalam skor.
+                      </div>
+                    ) : (<>
+                      <div style={{ fontSize: 11, color: "#A0AEC0", marginBottom: exNote ? 3 : 10, paddingLeft: 22 }}>
+                        ½ = {it.h} &nbsp;·&nbsp; 1 = {it.f}
+                      </div>
+                      {exNote && <div style={{ fontSize: 11, color: "#B7791F", marginBottom: 10, paddingLeft: 22, fontStyle: "italic" }}>{exNote}</div>}
+                      <MilestoneInput levelId={activeLevel.id} code={activeDomain.code} item={it} scores={scores} setScore={setScore}
+                        eesa={eesa} goEesa={() => { setTab("eesa"); }} />
+                    </>)}
                   </div>
                 );
               })}
@@ -1347,7 +1351,7 @@ export default function VBMappAssessment() {
                 </span>
               </div>
 
-              <MilestoneGrid scores={scores} roundFull={roundColor} roundHalf={roundHalf} eesa={eesa} invalid={invalidDomains} />
+              <MilestoneGrid scores={scores} roundFull={roundColor} roundHalf={roundHalf} eesa={eesa} invalidItems={invalidItems} />
 
               {/* Per-level totals */}
               <div style={{ display: "flex", gap: 10, marginTop: 16, flexWrap: "wrap" }}>
@@ -1356,7 +1360,7 @@ export default function VBMappAssessment() {
                     style={{ cursor: "pointer", flex: "1 1 140px", background: BAND_TINT[lv.id], borderRadius: 8, padding: "10px 12px" }}>
                     <div style={{ fontSize: 12, fontWeight: 700, color: "#2D3748" }}>{lv.label}</div>
                     <div style={{ fontSize: 11, color: "#718096" }}>{lv.range}</div>
-                    <div style={{ fontSize: 15, fontWeight: 800, color: "#2B6CB0", marginTop: 4 }}>{levelTotal(scores, lv, eesa, invalidDomains)} / {levelMax(lv, invalidDomains)}</div>
+                    <div style={{ fontSize: 15, fontWeight: 800, color: "#2B6CB0", marginTop: 4 }}>{levelTotal(scores, lv, eesa, invalidItems)} / {levelMax(lv, invalidItems)}</div>
                   </div>
                 ))}
               </div>
@@ -1367,7 +1371,7 @@ export default function VBMappAssessment() {
               <span style={{ fontSize: 24, fontWeight: 800, color: "#fff" }}>{grandTotal} / {GRAND_MAX}</span>
             </div>
             <p style={{ fontSize: 11, color: "#A0AEC0", textAlign: "center", margin: "-10px 0 0" }}>
-              Skor maksimum: {GRAND_MAX_FULL} dikurangi {GRAND_MAX_FULL - GRAND_MAX} milestone dari domain yang dikecualikan/ditandai tidak valid = {GRAND_MAX}.
+              Skor maksimum: {GRAND_MAX_FULL} dikurangi {GRAND_MAX_FULL - GRAND_MAX} milestone dari domain yang dikecualikan secara permanen atau ditandai tidak dapat diuji = {GRAND_MAX}.
             </p>
 
             <div style={{ background: "#fff", borderRadius: 12, padding: 24, boxShadow: "0 1px 8px rgba(0,0,0,0.06)" }}>
