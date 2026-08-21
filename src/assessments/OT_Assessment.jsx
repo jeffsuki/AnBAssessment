@@ -435,6 +435,42 @@ export default function ANBAssessment() {
       zip.file("xl/worksheets/sheet1.xml", sheet);
       zip.file("xl/styles.xml", styles);
 
+      // ── Add a second sheet: "Catatan Klinis" (per-section notes + kesimpulan) ──
+      const xe = s => String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\r\n|\r|\n/g, "&#10;");
+      const cellStr = (ref, text) => `<c r="${ref}" t="inlineStr"><is><t xml:space="preserve">${xe(text)}</t></is></c>`;
+      const rows = [];
+      let r = 1;
+      rows.push(`<row r="${r++}"><c r="A1" t="inlineStr"><is><t>CATATAN KLINIS PER ASPEK</t></is></c></row>`);
+      r++; // blank
+      rows.push(`<row r="${r}">${cellStr("A" + r, "Aspek")}${cellStr("B" + r, "Catatan Klinis")}</row>`); r++;
+      SECTIONS.forEach(section => {
+        const note = notes[section.id];
+        rows.push(`<row r="${r}">${cellStr("A" + r, `${section.code} — ${section.label}`)}${cellStr("B" + r, note || "-")}</row>`);
+        r++;
+      });
+      r++; // blank
+      rows.push(`<row r="${r}"><c r="A${r}" t="inlineStr"><is><t>KESIMPULAN &amp; REKOMENDASI KLINIS</t></is></c></row>`); r++;
+      rows.push(`<row r="${r}">${cellStr("A" + r, kesimpulan || "(Belum diisi)")}</row>`); r++;
+      const sheet2 =
+        `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+        `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">` +
+        `<cols><col min="1" max="1" width="34" customWidth="1"/><col min="2" max="2" width="70" customWidth="1"/></cols>` +
+        `<sheetData>${rows.join("")}</sheetData></worksheet>`;
+      zip.file("xl/worksheets/sheet2.xml", sheet2);
+
+      // register the new sheet in workbook.xml, its rels, and [Content_Types]
+      let wbxml = await zip.file("xl/workbook.xml").async("string");
+      wbxml = wbxml.replace("</sheets>", `<sheet xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" name="Catatan Klinis" sheetId="2" state="visible" r:id="rId4"/></sheets>`);
+      zip.file("xl/workbook.xml", wbxml);
+
+      let wbrels = await zip.file("xl/_rels/workbook.xml.rels").async("string");
+      wbrels = wbrels.replace("</Relationships>", `<Relationship Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml" Id="rId4"/></Relationships>`);
+      zip.file("xl/_rels/workbook.xml.rels", wbrels);
+
+      let ct = await zip.file("[Content_Types].xml").async("string");
+      ct = ct.replace("</Types>", `<Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>`);
+      zip.file("[Content_Types].xml", ct);
+
       const outBlob = await zip.generateAsync({
         type: "blob",
         mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
