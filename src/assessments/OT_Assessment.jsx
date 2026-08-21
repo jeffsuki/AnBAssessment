@@ -35,9 +35,9 @@ const TEMPLATE_SECTION_MAP = {
 const KESIMPULAN_CELL = "B155";
 // Fill colors matching the app's classification flags (ARGB, no leading #).
 const KATEGORI_FILL = {
-  Typical:     { fill: "FF38A169", font: "FFFFFFFF", text: "🟢 Tipikal" },
-  Kemungkinan: { fill: "FFD69E2E", font: "FFFFFFFF", text: "🟡 Kemungkinan" },
-  Definitif:   { fill: "FFE53E3E", font: "FFFFFFFF", text: "🔴 Definitif" },
+  Typical:     { fill: "FF38A169", font: "FFFFFFFF", text: "Tipikal" },
+  Kemungkinan: { fill: "FFD69E2E", font: "FFFFFFFF", text: "Kemungkinan" },
+  Definitif:   { fill: "FFE53E3E", font: "FFFFFFFF", text: "Definitif" },
 };
 
 const SECTIONS = [
@@ -361,7 +361,12 @@ export default function ANBAssessment() {
     setXlsxError("");
     try {
       const ExcelJS = (await import("exceljs")).default;
-      const buf = await (await fetch(templateUrl)).arrayBuffer();
+      const resp = await fetch(templateUrl);
+      if (!resp.ok) throw new Error("template fetch failed: " + resp.status);
+      const buf = await resp.arrayBuffer();
+      // A valid .xlsx is a zip; guard against an HTML/404 body being loaded.
+      const sig = new Uint8Array(buf.slice(0, 2));
+      if (sig[0] !== 0x50 || sig[1] !== 0x4b) throw new Error("template is not a valid xlsx");
       const wb = new ExcelJS.Workbook();
       await wb.xlsx.load(buf);
       const ws = wb.worksheets[0];
