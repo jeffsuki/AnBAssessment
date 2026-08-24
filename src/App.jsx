@@ -1,10 +1,12 @@
 import { useState } from "react";
 import VBMappAssessment from "./assessments/VBMapp_Assessment.jsx";
 import ANBAssessment from "./assessments/OT_Assessment.jsx";
+import ABLLSAssessment from "./assessments/ABLLS_Assessment.jsx";
 
 const TOOLS = [
   { id: "vbmapp", label: "VB-MAPP Milestones", Component: VBMappAssessment },
   { id: "ot", label: "ANB / OT Assessment", Component: ANBAssessment },
+  { id: "ablls", label: "ABLLS-R — Intraverbal (Section H)", Component: ABLLSAssessment },
 ];
 
 // ── SITE-WIDE PASSWORD ────────────────────────────────────────────────────────
