@@ -8,8 +8,6 @@ import { useState, useCallback, useMemo } from "react";
 // terhitung (auto), skor terisi otomatis dari jumlah baris — bisa ditimpa manual.
 // ─────────────────────────────────────────────────────────────────────────────
 
-const APP_PASSWORD = "AboveBeyond2026";
-
 const SCALE_COLORS = { 0: "#E53E3E", 1: "#DD6B20", 2: "#D69E2E", 3: "#3182CE", 4: "#38A169" };
 
 const TEST_ROUNDS = [
@@ -343,12 +341,6 @@ function ScoreButton({ value, selected, onClick, label, sub }) {
 }
 
 export default function ABLLSAssessment() {
-  const [authenticated, setAuthenticated] = useState(
-    () => (typeof sessionStorage !== "undefined" && sessionStorage.getItem("ab_auth") === "1")
-  );
-  const [passwordInput, setPasswordInput] = useState("");
-  const [passwordError, setPasswordError] = useState("");
-
   const [tab, setTab] = useState("client");
   const [client, setClient] = useState({
     nama: "", noClient: "", usia: "", tanggalLahir: "",
@@ -388,14 +380,6 @@ export default function ABLLSAssessment() {
   const totalPct = total.max ? (total.got / total.max) * 100 : 0;
   const roundColor = TEST_ROUNDS.find(r => r.value === testRound)?.color || "#2B6CB0";
   const answered = TASKS.filter(t => scores[t.id] != null).length;
-
-  function handlePasswordSubmit(e) {
-    e.preventDefault();
-    if (passwordInput === APP_PASSWORD) {
-      setAuthenticated(true); setPasswordError("");
-      try { sessionStorage.setItem("ab_auth", "1"); } catch { /* ignore */ }
-    } else setPasswordError("Password salah. Silakan coba lagi.");
-  }
 
   // ── LAPORAN ─────────────────────────────────────────────────────────────────
   function generateReport() {
@@ -474,27 +458,6 @@ export default function ABLLSAssessment() {
     setClient({ nama: "", noClient: "", usia: "", tanggalLahir: "", jenisKelamin: "", diagnosis: "", asesor: "", tanggalAsesmen: "" });
     setScores({}); setAnswers({}); setManual({}); setNotes({});
     setKesimpulan(""); setRekomendasi(""); setTestRound(1); setTab("client");
-  }
-
-  // ── GERBANG PASSWORD ────────────────────────────────────────────────────────
-  if (!authenticated) {
-    return (
-      <div style={{ minHeight: "100vh", background: "#EBF4FF", display: "flex", alignItems: "center", justifyContent: "center", padding: 24, fontFamily: "'Segoe UI', system-ui, sans-serif" }}>
-        <form onSubmit={handlePasswordSubmit} style={{ background: "#fff", borderRadius: 16, padding: 40, maxWidth: 380, width: "100%", boxShadow: "0 4px 24px rgba(0,0,0,0.08)" }}>
-          <div style={{ textAlign: "center", marginBottom: 24 }}>
-            <div style={{ fontSize: 36, marginBottom: 8 }}>🔒</div>
-            <div style={{ color: "#2B6CB0", fontSize: 11, fontWeight: 600, letterSpacing: 1, textTransform: "uppercase" }}>Above &amp; Beyond</div>
-            <h2 style={{ fontSize: 18, fontWeight: 700, color: "#1A202C", margin: "4px 0 0" }}>ABLLS-R — Intraverbal</h2>
-          </div>
-          <label style={{ display: "block", fontSize: 12, fontWeight: 600, color: "#4A5568", marginBottom: 6 }}>Masukkan Password</label>
-          <input type="password" value={passwordInput} autoFocus
-            onChange={e => { setPasswordInput(e.target.value); setPasswordError(""); }}
-            style={{ width: "100%", padding: "11px 14px", border: passwordError ? "1.5px solid #FC8181" : "1.5px solid #CBD5E0", borderRadius: 8, fontSize: 14, color: "#2D3748", boxSizing: "border-box", marginBottom: passwordError ? 8 : 20 }} />
-          {passwordError && <p style={{ color: "#C53030", fontSize: 12, margin: "0 0 16px" }}>{passwordError}</p>}
-          <button type="submit" style={{ width: "100%", background: "#2B6CB0", color: "#fff", border: "none", borderRadius: 8, padding: "12px 20px", fontSize: 14, fontWeight: 600, cursor: "pointer" }}>Masuk</button>
-        </form>
-      </div>
-    );
   }
 
   const activeGroup = GROUPS.find(g => g.code === tab);
