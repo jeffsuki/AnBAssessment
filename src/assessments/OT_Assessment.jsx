@@ -583,7 +583,7 @@ export default function ANBAssessment() {
         <div style={{ background: "#fff", borderRadius: 16, padding: 48, maxWidth: 480, textAlign: "center", boxShadow: "0 4px 24px rgba(0,0,0,0.08)" }}>
           <div style={{ fontSize: 48, marginBottom: 16 }}>✅</div>
           <h2 style={{ fontSize: 22, fontWeight: 700, color: "#1A202C", marginBottom: 8 }}>Asesmen Tersimpan</h2>
-          <p style={{ color: "#718096", marginBottom: 8 }}>Data {client.nama} berhasil dikirim ke Google Sheets.</p>
+          <p style={{ color: "#718096", marginBottom: 8 }}>Data {client.nama} berhasil disimpan ke database.</p>
           <p style={{ color: "#A0AEC0", fontSize: 13, marginBottom: 24 }}>Laporan sudah terdownload — upload ke folder Drive klien.</p>
           <button onClick={resetForm} style={{ background: "#2B6CB0", color: "#fff", border: "none", borderRadius: 8, padding: "12px 32px", fontSize: 15, fontWeight: 600, cursor: "pointer" }}>
             Asesmen Baru
@@ -878,7 +878,7 @@ export default function ANBAssessment() {
               disabled={submitting}
               style={{ width: "100%", background: submitting ? "#A0AEC0" : "#276749", color: "#fff", border: "none", borderRadius: 10, padding: "14px 20px", fontSize: 15, fontWeight: 700, cursor: submitting ? "not-allowed" : "pointer", boxShadow: "0 2px 12px rgba(39,103,73,0.2)", transition: "background 0.15s" }}
             >
-              {submitting ? "Menyimpan..." : "✅ Simpan ke Google Sheets + Download Laporan"}
+              {submitting ? "Menyimpan..." : "💾 Simpan ke Database + Download Laporan"}
             </button>
             <p style={{ fontSize: 12, color: "#A0AEC0", textAlign: "center", margin: 0 }}>
               "Excel (Form)" mengunduh file .xlsx sesuai template ANB — data & skor terisi, sel Kategori diwarnai sesuai klasifikasi.

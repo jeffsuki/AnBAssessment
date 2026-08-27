@@ -1,4 +1,6 @@
 import { useState, useCallback, useMemo } from "react";
+import { supabase, isConfigured } from "../supabaseClient.js";
+import { buildABLLSXlsxBlob } from "./reportBuilders.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ABLLS-R — SECTION H: INTRAVERBAL  |  Above & Beyond Child Development Center
@@ -353,6 +355,10 @@ export default function ABLLSAssessment() {
   const [notes, setNotes] = useState({});
   const [kesimpulan, setKesimpulan] = useState("");
   const [rekomendasi, setRekomendasi] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [saveMsg, setSaveMsg] = useState("");
+  const [saveErr, setSaveErr] = useState("");
+  const [xlsxBusy, setXlsxBusy] = useState(false);
 
   // tulis jawaban → skor ikut terisi bila butir punya kriteria terhitung
   const setAnswer = useCallback((task, text) => {
@@ -454,10 +460,97 @@ export default function ABLLSAssessment() {
     URL.revokeObjectURL(url);
   }
 
+  async function saveToSupabase() {
+    setSaving(true); setSaveMsg(""); setSaveErr("");
+    try {
+      if (!isConfigured) throw new Error("Supabase belum dikonfigurasi (isi src/supabaseClient.js).");
+
+      // Flat payload: per-task score/answer/manual, per-group totals, notes.
+      const data = {
+        nama: client.nama, noClient: client.noClient, usia: client.usia,
+        tanggalLahir: client.tanggalLahir, jenisKelamin: client.jenisKelamin,
+        diagnosis: client.diagnosis, asesor: client.asesor,
+        tanggalAsesmen: client.tanggalAsesmen, testRound,
+        kesimpulan, rekomendasi,
+      };
+      GROUPS.forEach(g => {
+        g.tasks.forEach(t => {
+          const v = scores[t.id];
+          data[`${t.id}_skor`] = v != null ? v : "";
+          if (answers[t.id]) data[`${t.id}_jawaban`] = answers[t.id];
+          if (manual[t.id]) data[`${t.id}_manual`] = true;
+        });
+        const gs = groupScore(scores, g);
+        data[`${g.code}_total`] = gs.got;
+        data[`${g.code}_max`] = gs.max;
+        if (notes[g.code]) data[`${g.code}_catatan`] = notes[g.code];
+      });
+      data.total_skor = total.got;
+      data.max_skor = total.max;
+
+      const { error } = await supabase.from("assessments").insert({
+        type: "ABLLS",
+        client_name: client.nama || null,
+        client_no: client.noClient || null,
+        usia: client.usia || null,
+        jenis_kelamin: client.jenisKelamin || null,
+        diagnosis: client.diagnosis || null,
+        asesor: client.asesor || null,
+        assessment_date: client.tanggalAsesmen || null,
+        test_round: testRound || null,
+        total_score: total.got ?? null,
+        max_score: total.max ?? null,
+        kesimpulan: kesimpulan || null,
+        data,
+      });
+      if (error) throw error;
+      setSaveMsg("Tersimpan ke database. Entri muncul di Dashboard.");
+    } catch (e) {
+      setSaveErr("Gagal menyimpan: " + (e && e.message ? e.message : "unknown"));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function downloadExcel() {
+    setXlsxBusy(true);
+    try {
+      const cfg = {
+        client, testRound,
+        groups: GROUPS.map(g => {
+          const gs = groupScore(scores, g);
+          return {
+            code: g.code, name: g.name, total: gs.got, max: gs.max,
+            tasks: g.tasks.map(t => ({
+              id: t.id, nameId: t.nameId, max: t.max,
+              score: scores[t.id], answer: answers[t.id] || "",
+              manual: !!manual[t.id], na: isNA(scores[t.id]),
+            })),
+          };
+        }),
+        totalGot: total.got, totalMax: total.max,
+        kesimpulan, rekomendasi,
+      };
+      const blob = await buildABLLSXlsxBlob(cfg);
+      const date = new Date().toLocaleDateString("id-ID", { day: "2-digit", month: "long", year: "numeric" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `ABLLSR_Intraverbal_${(client.nama || "klien").replace(/\s+/g, "_")}_Tes${testRound}_${client.tanggalAsesmen || date}.xlsx`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setSaveErr("Gagal membuat file Excel: " + (e && e.message ? e.message : "unknown"));
+    } finally {
+      setXlsxBusy(false);
+    }
+  }
+
   function resetForm() {
     setClient({ nama: "", noClient: "", usia: "", tanggalLahir: "", jenisKelamin: "", diagnosis: "", asesor: "", tanggalAsesmen: "" });
     setScores({}); setAnswers({}); setManual({}); setNotes({});
     setKesimpulan(""); setRekomendasi(""); setTestRound(1); setTab("client");
+    setSaving(false); setSaveMsg(""); setSaveErr("");
   }
 
   const activeGroup = GROUPS.find(g => g.code === tab);
@@ -739,14 +832,26 @@ export default function ABLLSAssessment() {
                 style={{ width: "100%", padding: "12px 14px", border: "1.5px solid #CBD5E0", borderRadius: 8, fontSize: 14, color: "#2D3748", resize: "vertical", lineHeight: 1.6, boxSizing: "border-box", fontFamily: "inherit" }} />
             </div>
 
+            {saveErr && (
+              <div style={{ background: "#FFF5F5", border: "1.5px solid #FC8181", borderRadius: 8, padding: "12px 16px", fontSize: 13, color: "#C53030" }}>⚠️ {saveErr}</div>
+            )}
+            {saveMsg && (
+              <div style={{ background: "#F0FFF4", border: "1.5px solid #9AE6B4", borderRadius: 8, padding: "12px 16px", fontSize: 13, color: "#276749" }}>✅ {saveMsg}</div>
+            )}
             <div style={{ display: "flex", gap: 12 }}>
               <button onClick={generateReport}
-                style={{ flex: 2, background: "#276749", color: "#fff", border: "none", borderRadius: 10, padding: "14px 20px", fontSize: 15, fontWeight: 700, cursor: "pointer", boxShadow: "0 2px 12px rgba(39,103,73,0.2)" }}>📄 Download Laporan</button>
+                style={{ flex: 1, background: "#EDF2F7", color: "#2D3748", border: "none", borderRadius: 10, padding: "14px 20px", fontSize: 14, fontWeight: 700, cursor: "pointer" }}>📄 Laporan (.txt)</button>
+              <button onClick={downloadExcel} disabled={xlsxBusy}
+                style={{ flex: 1, background: xlsxBusy ? "#A0AEC0" : "#2B6CB0", color: "#fff", border: "none", borderRadius: 10, padding: "14px 20px", fontSize: 14, fontWeight: 700, cursor: xlsxBusy ? "not-allowed" : "pointer" }}>
+                {xlsxBusy ? "Membuat..." : "📊 Excel"}</button>
+              <button onClick={saveToSupabase} disabled={saving}
+                style={{ flex: 2, background: saving ? "#A0AEC0" : "#276749", color: "#fff", border: "none", borderRadius: 10, padding: "14px 20px", fontSize: 15, fontWeight: 700, cursor: saving ? "not-allowed" : "pointer", boxShadow: "0 2px 12px rgba(39,103,73,0.2)" }}>
+                {saving ? "Menyimpan..." : "💾 Simpan ke Database"}</button>
               <button onClick={resetForm}
                 style={{ flex: 1, background: "#EDF2F7", color: "#4A5568", border: "none", borderRadius: 10, padding: "14px 20px", fontSize: 14, fontWeight: 700, cursor: "pointer" }}>Asesmen Baru</button>
             </div>
             <p style={{ fontSize: 12, color: "#A0AEC0", textAlign: "center", margin: 0 }}>
-              Laporan (.txt) memuat jawaban anak per butir. Butir bertanda NA dikeluarkan dari penyebut.
+              "Simpan ke Database" mengirim entri ke Dashboard. Laporan (.txt) memuat jawaban anak per butir; butir NA dikeluarkan dari penyebut.
             </p>
           </div>
         )}

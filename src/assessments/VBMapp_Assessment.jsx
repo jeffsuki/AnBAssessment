@@ -1,4 +1,6 @@
 import { useState, useCallback, useMemo } from "react";
+import { supabase, isConfigured } from "../supabaseClient.js";
+import { buildVbmappXlsxBlob } from "./reportBuilders.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // VB-MAPP MILESTONES ASSESSMENT — Above & Beyond
@@ -760,7 +762,7 @@ function MilestoneGrid({ scores, roundFull, roundHalf, eesa, invalidItems }) {
   );
 }
 
-const SHEET_WEBHOOK = "PASTE_YOUR_APPS_SCRIPT_URL_HERE";
+// storage moved to Supabase (see supabaseClient.js)
 
 export default function VBMappAssessment() {
   const [tab, setTab] = useState("client");          // client | L1 | L2 | L3 | summary
@@ -888,132 +890,31 @@ export default function VBMappAssessment() {
     setXlsxBusy(true);
     setXlsxError("");
     try {
-      const ExcelJS = (await import("exceljs")).default;
-      const wb = new ExcelJS.Workbook();
-      wb.creator = "Above & Beyond Child Development Center";
-      wb.created = new Date();
+      const cfg = {
+        client, testRound, roundColor, roundHalf,
+        GRID_COLS, GRID_ROWS, levelOf, BAND_TINT,
+        cell: (code, n) => gridCell(code, n, scores, eesa, invalidItems),
+        eesaGroups: EESA_GROUPS.map(g => ({ name: g.name, score: eesaGroupScore(eesa, g) })),
+        eesaTotal: eesaTotal(eesa),
+        levels: LEVELS.map(lv => ({
+          id: lv.id, label: lv.label, range: lv.range,
+          total: levelTotal(scores, lv, eesa, invalidItems),
+          max: levelMax(lv, invalidItems),
+          domains: lv.domains.map(d => ({
+            code: d.code, name: d.name, disabled: !!d.disabled,
+            items: d.items.map(it => ({
+              n: it.n, text: it.text,
+              invalid: isItemInvalid(lv.id, d.code, it.n, invalidItems),
+              score: scoreOf(lv.id, d.code, it, scores, eesa),
+              answered: answeredOf(lv.id, d.code, it, scores, eesa),
+              data: isEchoic(d.code) ? eesaTotal(eesa) : capDisplay(getCap(lv.id, d.code, it.n), scores[keyFor(lv.id, d.code, it.n)]),
+            })),
+          })),
+        })),
+        grandTotal, grandMax: GRAND_MAX, kesimpulan,
+      };
+      const blob = await buildVbmappXlsxBlob(cfg);
       const dateStr = new Date().toLocaleDateString("id-ID", { day: "2-digit", month: "long", year: "numeric" });
-
-      // ── Sheet 1: Data Klien ──
-      const wsClient = wb.addWorksheet("Data Klien");
-      wsClient.columns = [{ width: 20 }, { width: 34 }];
-      const clientRows = [
-        ["Nama Anak", client.nama], ["No. Client", client.noClient], ["Usia", client.usia],
-        ["Tanggal Lahir", client.tanggalLahir], ["Jenis Kelamin", client.jenisKelamin],
-        ["Diagnosis", client.diagnosis], ["Asesor", client.asesor], ["Tanggal Asesmen", client.tanggalAsesmen],
-        ["Tes ke-", testRound], ["Tanggal Cetak", dateStr],
-      ];
-      wsClient.addRow(["ABOVE & BEYOND — VB-MAPP MILESTONES ASSESSMENT"]).font = { bold: true, size: 13 };
-      wsClient.addRow([]);
-      clientRows.forEach(([k, v]) => {
-        const row = wsClient.addRow([k, v ?? ""]);
-        row.getCell(1).font = { bold: true };
-      });
-
-      // ── Sheet 2: Milestones Grid (the pyramid, matches on-screen Rekap) ──
-      const wsGrid = wb.addWorksheet("Milestones Grid");
-      wsGrid.getColumn(1).width = 6;
-      GRID_COLS.forEach((_, i) => { wsGrid.getColumn(i + 2).width = 5; });
-      wsGrid.views = [{ state: "frozen", xSplit: 1, ySplit: 1 }];
-
-      const header = wsGrid.addRow(["#", ...GRID_COLS]);
-      header.eachCell(cell => {
-        cell.font = { bold: true, size: 9 };
-        cell.alignment = { textRotation: 90, horizontal: "center", vertical: "bottom" };
-        cell.border = { top: { style: "thin" }, bottom: { style: "thin" }, left: { style: "thin" }, right: { style: "thin" } };
-      });
-      header.height = 60;
-
-      GRID_ROWS.forEach(n => {
-        const row = wsGrid.addRow([n, ...GRID_COLS.map(() => "")]);
-        const bandHex = BAND_TINT[levelOf(n)];
-        const labelCell = row.getCell(1);
-        labelCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: argb(bandHex) } };
-        labelCell.font = { bold: true, size: 10 };
-        labelCell.alignment = { horizontal: "center" };
-        labelCell.border = { top: { style: "thin" }, bottom: { style: "thin" }, left: { style: "thin" }, right: { style: "thin" } };
-
-        GRID_COLS.forEach((code, ci) => {
-          const cell = row.getCell(ci + 2);
-          cell.border = { top: { style: "thin", color: { argb: "FFE2E8F0" } }, bottom: { style: "thin", color: { argb: "FFE2E8F0" } }, left: { style: "thin", color: { argb: "FFE2E8F0" } }, right: { style: "thin", color: { argb: "FFE2E8F0" } } };
-          const c = gridCell(code, n, scores, eesa, invalidItems);
-          if (!c.exists) {
-            cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: argb("#E2E8F0") } };
-          } else if (c.disabled) {
-            cell.fill = { type: "pattern", pattern: "gray125", fgColor: { argb: argb("#CBD5E0") }, bgColor: { argb: "FFFFFFFF" } };
-          } else if (c.answered && c.score >= 1) {
-            cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: argb(roundColor) } };
-          } else if (c.answered && c.score >= 0.5) {
-            cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: argb(roundHalf) } };
-          }
-        });
-        row.height = 16;
-      });
-
-      // Legend
-      wsGrid.addRow([]);
-      const legend = [
-        [`Tes ke-${testRound}`, "1 = tercapai", roundColor],
-        ["", "½ = parsial", roundHalf],
-        ["", "0 / belum dinilai", "#FFFFFF"],
-        ["", "tidak dinilai di level ini", "#E2E8F0"],
-        ["", "dikecualikan / tidak dapat diuji", "#CBD5E0"],
-      ];
-      legend.forEach(([lab, txt, hex]) => {
-        const r = wsGrid.addRow([lab, txt]);
-        const swatch = r.getCell(1);
-        if (hex) swatch.fill = { type: "pattern", pattern: "solid", fgColor: { argb: argb(hex) } };
-      });
-
-      // ── Sheet 3: EESA ──
-      const wsEesa = wb.addWorksheet("EESA");
-      wsEesa.columns = [{ width: 34 }, { width: 10 }, { width: 10 }];
-      wsEesa.addRow(["EARLY ECHOIC SKILLS ASSESSMENT (EESA)"]).font = { bold: true, size: 13 };
-      wsEesa.addRow(["Barbara E. Esch, Ph.D., BCBA, CCC-SLP"]).font = { italic: true, size: 10 };
-      wsEesa.addRow([]);
-      EESA_GROUPS.forEach(g => {
-        wsEesa.addRow([g.name]).font = { bold: true };
-        g.items.forEach((word, i) => {
-          const v = eesa[eesaKey(g.id, i)];
-          wsEesa.addRow([word, v === "x" ? "X" : ""]);
-        });
-        wsEesa.addRow([`Sub-total ${g.id}`, eesaGroupScore(eesa, g)]).font = { bold: true };
-        wsEesa.addRow([]);
-      });
-      const totalRow = wsEesa.addRow(["TOTAL RAW SCORE (Groups 1–5)", eesaTotal(eesa)]);
-      totalRow.font = { bold: true, size: 12 };
-
-      // ── Sheet 4: Detail per Milestone ──
-      const wsDetail = wb.addWorksheet("Detail Milestone");
-      wsDetail.columns = [{ width: 8 }, { width: 12 }, { width: 10 }, { width: 55 }, { width: 8 }, { width: 40 }];
-      wsDetail.addRow(["Level", "Domain", "No.", "Deskripsi Milestone", "Skor", "Respon Tercatat"]).font = { bold: true };
-      LEVELS.forEach(lv => {
-        lv.domains.forEach(d => {
-          d.items.forEach(it => {
-            const invalid = isItemInvalid(lv.id, d.code, it.n, invalidItems);
-            const sc = (d.disabled || invalid) ? "—" : scoreOf(lv.id, d.code, it, scores, eesa);
-            const data = d.disabled ? "dikecualikan"
-              : invalid ? "tidak dapat diuji"
-              : isEchoic(d.code) ? `Skor EESA: ${eesaTotal(eesa)}`
-              : capDisplay(getCap(lv.id, d.code, it.n), scores[keyFor(lv.id, d.code, it.n)]);
-            wsDetail.addRow([lv.label, d.name, it.n, it.text, sc, data]);
-          });
-        });
-      });
-
-      // ── Sheet 5: Ringkasan (level & grand totals + kesimpulan) ──
-      const wsSum = wb.addWorksheet("Ringkasan");
-      wsSum.columns = [{ width: 30 }, { width: 14 }];
-      wsSum.addRow(["Level", "Skor"]).font = { bold: true };
-      LEVELS.forEach(lv => wsSum.addRow([`${lv.label} (${lv.range})`, `${levelTotal(scores, lv, eesa, invalidItems)} / ${levelMax(lv, invalidItems)}`]));
-      wsSum.addRow([]);
-      wsSum.addRow(["TOTAL MILESTONES", `${grandTotal} / ${GRAND_MAX}`]).font = { bold: true, size: 12 };
-      wsSum.addRow([]);
-      wsSum.addRow(["Kesimpulan & Rekomendasi Klinis"]).font = { bold: true };
-      wsSum.addRow([kesimpulan || "(Belum diisi)"]);
-
-      const buf = await wb.xlsx.writeBuffer();
-      const blob = new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
@@ -1021,7 +922,7 @@ export default function VBMappAssessment() {
       a.click();
       URL.revokeObjectURL(url);
     } catch (err) {
-      setXlsxError("Gagal membuat file Excel. Pastikan paket 'exceljs' sudah terpasang (npm i exceljs) di environment tempat aplikasi ini dijalankan.");
+      setXlsxError("Gagal membuat file Excel: " + (err && err.message ? err.message : "unknown"));
     } finally {
       setXlsxBusy(false);
     }
@@ -1060,17 +961,29 @@ export default function VBMappAssessment() {
     row.kesimpulan = kesimpulan;
 
     try {
-      await fetch(SHEET_WEBHOOK, {
-        method: "POST", mode: "no-cors",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(row),
+      if (!isConfigured) throw new Error("Supabase belum dikonfigurasi (isi src/supabaseClient.js).");
+      const { error } = await supabase.from("assessments").insert({
+        type: "VBMAPP",
+        client_name: client.nama || null,
+        client_no: client.noClient || null,
+        usia: client.usia || null,
+        jenis_kelamin: client.jenisKelamin || null,
+        diagnosis: client.diagnosis || null,
+        asesor: client.asesor || null,
+        assessment_date: client.tanggalAsesmen || null,
+        test_round: testRound || null,
+        total_score: grandTotal ?? null,
+        max_score: GRAND_MAX ?? null,
+        kesimpulan: kesimpulan || null,
+        data: row,
       });
+      if (error) throw error;
       generateReport();
       setSubmitted(true);
     } catch (e) {
-      // Local report should not be held hostage by a failed/placeholder webhook.
+      // Local report should not be held hostage by a failed save.
       generateReport();
-      setSubmitError("Laporan (.txt) tetap terdownload, tapi gagal mengirim ke Google Sheets. Cek koneksi internet dan URL webhook.");
+      setSubmitError("Laporan (.txt) tetap terdownload, tapi gagal menyimpan ke database: " + (e && e.message ? e.message : "unknown"));
     } finally {
       setSubmitting(false);
     }
@@ -1089,7 +1002,7 @@ export default function VBMappAssessment() {
         <div style={{ background: "#fff", borderRadius: 16, padding: 48, maxWidth: 480, textAlign: "center", boxShadow: "0 4px 24px rgba(0,0,0,0.08)" }}>
           <div style={{ fontSize: 48, marginBottom: 16 }}>✅</div>
           <h2 style={{ fontSize: 22, fontWeight: 700, color: "#1A202C", marginBottom: 8 }}>Asesmen Tersimpan</h2>
-          <p style={{ color: "#718096", marginBottom: 8 }}>Data {client.nama} (Tes ke-{testRound}) berhasil dikirim ke Google Sheets.</p>
+          <p style={{ color: "#718096", marginBottom: 8 }}>Data {client.nama} (Tes ke-{testRound}) berhasil disimpan ke database.</p>
           <p style={{ color: "#A0AEC0", fontSize: 13, marginBottom: 24 }}>Laporan sudah terdownload — upload ke folder Drive klien.</p>
           <button onClick={resetForm} style={{ background: "#2B6CB0", color: "#fff", border: "none", borderRadius: 8, padding: "12px 32px", fontSize: 15, fontWeight: 600, cursor: "pointer" }}>Asesmen Baru</button>
         </div>
@@ -1392,15 +1305,15 @@ export default function VBMappAssessment() {
                 style={{ flex: 1, background: "#EDF2F7", color: "#2D3748", border: "none", borderRadius: 10, padding: "14px 20px", fontSize: 14, fontWeight: 700, cursor: "pointer" }}>📄 Laporan (.txt)</button>
               <button onClick={downloadExcel} disabled={xlsxBusy}
                 style={{ flex: 1, background: xlsxBusy ? "#A0AEC0" : "#2B6CB0", color: "#fff", border: "none", borderRadius: 10, padding: "14px 20px", fontSize: 14, fontWeight: 700, cursor: xlsxBusy ? "not-allowed" : "pointer" }}>
-                {xlsxBusy ? "Membuat..." : "📊 Excel (Template)"}
+                {xlsxBusy ? "Membuat..." : "📊 Excel (Grafik)"}
               </button>
             </div>
             <button onClick={handleSubmit} disabled={submitting}
               style={{ width: "100%", background: submitting ? "#A0AEC0" : "#276749", color: "#fff", border: "none", borderRadius: 10, padding: "14px 20px", fontSize: 15, fontWeight: 700, cursor: submitting ? "not-allowed" : "pointer", boxShadow: "0 2px 12px rgba(39,103,73,0.2)" }}>
-              {submitting ? "Menyimpan..." : "✅ Simpan ke Google Sheets + Download Laporan"}
+              {submitting ? "Menyimpan..." : "💾 Simpan ke Database + Download Laporan"}
             </button>
             <p style={{ fontSize: 12, color: "#A0AEC0", textAlign: "center", margin: 0 }}>
-              "Excel (Template)" mengunduh file .xlsx dengan grid pyramid berwarna sesuai tampilan Rekap — tidak memerlukan koneksi Google Sheets.
+              "Excel (Template)" mengunduh file .xlsx dengan grid pyramid berwarna sesuai tampilan Rekap — tidak memerlukan koneksi database.
             </p>
           </div>
         )}
