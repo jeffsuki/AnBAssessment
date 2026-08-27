@@ -1,6 +1,7 @@
 import { useState, useCallback } from "react";
 import JSZip from "jszip";
 import templateUrl from "./ot_template.xlsx?url";
+import { supabase, STORAGE_BUCKET, isConfigured } from "../supabaseClient.js";
 
 // ── DATA ──────────────────────────────────────────────────────────────────────
 
@@ -282,7 +283,7 @@ export default function ANBAssessment() {
   const totalSkor = SECTIONS.reduce((sum, s) => sum + sectionTotal(scores, s.id), 0);
 
   // ── GOOGLE SHEETS WEBHOOK URL ────────────────────────────────────────────────
-  const SHEET_WEBHOOK = "https://script.google.com/macros/s/AKfycbzX5dFhR5cuoGLodoUkagserEN26VWbxHEph83vNuQOSKlpvzpUS4IxMF4XB9b6Mfyr/exec";
+  const SHEET_WEBHOOK = null; // storage moved to Supabase (see supabaseClient.js)
 
   // ── PDF GENERATOR ────────────────────────────────────────────────────────────
   function generatePDF() {
@@ -361,126 +362,124 @@ export default function ANBAssessment() {
   // workbook is NEVER rewritten by a spreadsheet library, so nothing that Excel
   // would reject is introduced — every other byte of the template is preserved.
   // Requires "jszip" (npm i jszip).
+  // Builds the filled workbook (main form + Catatan Klinis sheet) and returns a Blob.
+  async function buildFilledXlsxBlob() {
+    const resp = await fetch(templateUrl);
+    if (!resp.ok) throw new Error("template fetch failed: " + resp.status);
+    const buf = await resp.arrayBuffer();
+    const sig = new Uint8Array(buf.slice(0, 2));
+    if (sig[0] !== 0x50 || sig[1] !== 0x4b) throw new Error("template is not a valid xlsx");
+
+    const zip = await JSZip.loadAsync(buf);
+    let sheet = await zip.file("xl/worksheets/sheet1.xml").async("string");
+    let styles = await zip.file("xl/styles.xml").async("string");
+
+    const esc = s => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    const setCell = (ref, inner, extraAttr = "") => {
+      const re = new RegExp(`<c r="${ref}"([^>]*?)(?:/>|>[\\s\\S]*?</c>)`);
+      sheet = sheet.replace(re, (m, attrs) => {
+        const s = (attrs.match(/\ss="\d+"/) || [""])[0];
+        return `<c r="${ref}"${s}${extraAttr}>${inner}</c>`;
+      });
+    };
+    const setNumber = (ref, num) => setCell(ref, `<v>${num}</v>`);
+    const setString = (ref, text) => setCell(ref, `<is><t xml:space="preserve">${esc(text)}</t></is>`, ` t="inlineStr"`);
+
+    const baseXf = '<xf numFmtId="0" fontId="1" fillId="0" borderId="12" applyAlignment="1" pivotButton="0" quotePrefix="0" xfId="0"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>';
+    const fillCount = parseInt((styles.match(/<fills count="(\d+)">/) || [])[1] || "6", 10);
+    const xfCount = parseInt((styles.match(/<cellXfs count="(\d+)">/) || [])[1] || "63", 10);
+    const styleIndexFor = {};
+    let newFills = "", newXfs = "";
+    KATEGORI_ORDER.forEach((label, i) => {
+      const rgb = KATEGORI[label].rgb;
+      newFills += `<fill><patternFill patternType="solid"><fgColor rgb="${rgb}"/><bgColor rgb="${rgb}"/></patternFill></fill>`;
+      newXfs += baseXf.replace('fillId="0"', `fillId="${fillCount + i}"`);
+      styleIndexFor[label] = xfCount + i;
+    });
+    styles = styles
+      .replace(/<fills count="\d+">/, `<fills count="${fillCount + 3}">`)
+      .replace(/<\/fills>/, newFills + "</fills>")
+      .replace(/<cellXfs count="\d+">/, `<cellXfs count="${xfCount + 3}">`)
+      .replace(/<\/cellXfs>/, newXfs + "</cellXfs>");
+
+    Object.entries(TEMPLATE_CLIENT_CELLS).forEach(([key, ref]) => {
+      if (client[key]) setString(ref, client[key]);
+    });
+    SECTIONS.forEach(section => {
+      const map = TEMPLATE_SECTION_MAP[section.id];
+      if (!map) return;
+      section.items.forEach((_, i) => {
+        const v = scores[`${section.id}_${i}`];
+        if (map.rows[i] != null && v) setNumber(`G${map.rows[i]}`, parseInt(v));
+      });
+      const total = sectionTotal(scores, section.id);
+      const flag = sectionFlag(total, section);
+      const label = flag && flag.label;
+      if (label && KATEGORI[label]) {
+        const styleIdx = styleIndexFor[label];
+        const re = new RegExp(`<c r="${map.kategori}"[^>]*?(?:/>|>[\\s\\S]*?</c>)`);
+        sheet = sheet.replace(re, `<c r="${map.kategori}" s="${styleIdx}" t="inlineStr"><is><t xml:space="preserve">${esc(KATEGORI[label].text)}</t></is></c>`);
+      }
+    });
+    if (kesimpulan) setString(KESIMPULAN_CELL, kesimpulan);
+
+    zip.file("xl/worksheets/sheet1.xml", sheet);
+    zip.file("xl/styles.xml", styles);
+
+    // Second sheet: Catatan Klinis
+    const xe = s => String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\r\n|\r|\n/g, "&#10;");
+    const cellStr = (ref, text) => `<c r="${ref}" t="inlineStr"><is><t xml:space="preserve">${xe(text)}</t></is></c>`;
+    const rows = [];
+    let r = 1;
+    rows.push(`<row r="${r++}"><c r="A1" t="inlineStr"><is><t>CATATAN KLINIS PER ASPEK</t></is></c></row>`);
+    r++;
+    rows.push(`<row r="${r}">${cellStr("A" + r, "Aspek")}${cellStr("B" + r, "Catatan Klinis")}</row>`); r++;
+    SECTIONS.forEach(section => {
+      const note = notes[section.id];
+      rows.push(`<row r="${r}">${cellStr("A" + r, `${section.code} — ${section.label}`)}${cellStr("B" + r, note || "-")}</row>`);
+      r++;
+    });
+    r++;
+    rows.push(`<row r="${r}"><c r="A${r}" t="inlineStr"><is><t>KESIMPULAN &amp; REKOMENDASI KLINIS</t></is></c></row>`); r++;
+    rows.push(`<row r="${r}">${cellStr("A" + r, kesimpulan || "(Belum diisi)")}</row>`); r++;
+    const sheet2 =
+      `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+      `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">` +
+      `<cols><col min="1" max="1" width="34" customWidth="1"/><col min="2" max="2" width="70" customWidth="1"/></cols>` +
+      `<sheetData>${rows.join("")}</sheetData></worksheet>`;
+    zip.file("xl/worksheets/sheet2.xml", sheet2);
+
+    let wbxml = await zip.file("xl/workbook.xml").async("string");
+    wbxml = wbxml.replace("</sheets>", `<sheet xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" name="Catatan Klinis" sheetId="2" state="visible" r:id="rId4"/></sheets>`);
+    zip.file("xl/workbook.xml", wbxml);
+    let wbrels = await zip.file("xl/_rels/workbook.xml.rels").async("string");
+    wbrels = wbrels.replace("</Relationships>", `<Relationship Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml" Id="rId4"/></Relationships>`);
+    zip.file("xl/_rels/workbook.xml.rels", wbrels);
+    let ct = await zip.file("[Content_Types].xml").async("string");
+    ct = ct.replace("</Types>", `<Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>`);
+    zip.file("[Content_Types].xml", ct);
+
+    return zip.generateAsync({
+      type: "blob",
+      mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      compression: "DEFLATE",
+    });
+  }
+
+  const excelFileName = () => {
+    const dateStr = new Date().toLocaleDateString("id-ID", { day: "2-digit", month: "long", year: "numeric" });
+    return `ANB_Assessment_${(client.nama || "klien").replace(/\s+/g, "_")}_${client.tanggalAsesmen || dateStr}.xlsx`;
+  };
+
   async function downloadExcelTemplate() {
     setXlsxBusy(true);
     setXlsxError("");
     try {
-      const resp = await fetch(templateUrl);
-      if (!resp.ok) throw new Error("template fetch failed: " + resp.status);
-      const buf = await resp.arrayBuffer();
-      const sig = new Uint8Array(buf.slice(0, 2));
-      if (sig[0] !== 0x50 || sig[1] !== 0x4b) throw new Error("template is not a valid xlsx");
-
-      const zip = await JSZip.loadAsync(buf);
-      let sheet = await zip.file("xl/worksheets/sheet1.xml").async("string");
-      let styles = await zip.file("xl/styles.xml").async("string");
-
-      const esc = s => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-      // Replace one cell's content, preserving its existing style index (s="..").
-      const setCell = (ref, inner, extraAttr = "") => {
-        const re = new RegExp(`<c r="${ref}"([^>]*?)(?:/>|>[\\s\\S]*?</c>)`);
-        sheet = sheet.replace(re, (m, attrs) => {
-          const s = (attrs.match(/\ss="\d+"/) || [""])[0];
-          return `<c r="${ref}"${s}${extraAttr}>${inner}</c>`;
-        });
-      };
-      const setNumber = (ref, num) => setCell(ref, `<v>${num}</v>`);
-      const setString = (ref, text) => setCell(ref, `<is><t xml:space="preserve">${esc(text)}</t></is>`, ` t="inlineStr"`);
-
-      // ── styles.xml: add 3 solid fills + 3 cellXfs cloned from the J-cell style ──
-      // Base J-cell xf is index 6 in this template; new fills append after the
-      // existing 6, new xfs append after the existing 63.
-      const baseXf = '<xf numFmtId="0" fontId="1" fillId="0" borderId="12" applyAlignment="1" pivotButton="0" quotePrefix="0" xfId="0"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>';
-      const fillCount = parseInt((styles.match(/<fills count="(\d+)">/) || [])[1] || "6", 10);
-      const xfCount = parseInt((styles.match(/<cellXfs count="(\d+)">/) || [])[1] || "63", 10);
-      const styleIndexFor = {};
-      let newFills = "", newXfs = "";
-      KATEGORI_ORDER.forEach((label, i) => {
-        const rgb = KATEGORI[label].rgb;
-        const fillId = fillCount + i;
-        const xfIndex = xfCount + i;
-        newFills += `<fill><patternFill patternType="solid"><fgColor rgb="${rgb}"/><bgColor rgb="${rgb}"/></patternFill></fill>`;
-        newXfs += baseXf.replace('fillId="0"', `fillId="${fillId}"`);
-        styleIndexFor[label] = xfIndex;
-      });
-      styles = styles
-        .replace(/<fills count="\d+">/, `<fills count="${fillCount + 3}">`)
-        .replace(/<\/fills>/, newFills + "</fills>")
-        .replace(/<cellXfs count="\d+">/, `<cellXfs count="${xfCount + 3}">`)
-        .replace(/<\/cellXfs>/, newXfs + "</cellXfs>");
-
-      // ── sheet1.xml: client, scores, kategori (value + colored style), kesimpulan ──
-      Object.entries(TEMPLATE_CLIENT_CELLS).forEach(([key, ref]) => {
-        if (client[key]) setString(ref, client[key]);
-      });
-      SECTIONS.forEach(section => {
-        const map = TEMPLATE_SECTION_MAP[section.id];
-        if (!map) return;
-        section.items.forEach((_, i) => {
-          const v = scores[`${section.id}_${i}`];
-          if (map.rows[i] != null && v) setNumber(`G${map.rows[i]}`, parseInt(v));
-        });
-        const total = sectionTotal(scores, section.id);
-        const flag = sectionFlag(total, section);
-        const label = flag && (flag.label === "Typical" ? "Typical" : flag.label);
-        if (label && KATEGORI[label]) {
-          // set value + swap the style index to the colored xf
-          const styleIdx = styleIndexFor[label];
-          const re = new RegExp(`<c r="${map.kategori}"[^>]*?(?:/>|>[\\s\\S]*?</c>)`);
-          sheet = sheet.replace(re, `<c r="${map.kategori}" s="${styleIdx}" t="inlineStr"><is><t xml:space="preserve">${esc(KATEGORI[label].text)}</t></is></c>`);
-        }
-      });
-      if (kesimpulan) setString(KESIMPULAN_CELL, kesimpulan);
-
-      zip.file("xl/worksheets/sheet1.xml", sheet);
-      zip.file("xl/styles.xml", styles);
-
-      // ── Add a second sheet: "Catatan Klinis" (per-section notes + kesimpulan) ──
-      const xe = s => String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\r\n|\r|\n/g, "&#10;");
-      const cellStr = (ref, text) => `<c r="${ref}" t="inlineStr"><is><t xml:space="preserve">${xe(text)}</t></is></c>`;
-      const rows = [];
-      let r = 1;
-      rows.push(`<row r="${r++}"><c r="A1" t="inlineStr"><is><t>CATATAN KLINIS PER ASPEK</t></is></c></row>`);
-      r++; // blank
-      rows.push(`<row r="${r}">${cellStr("A" + r, "Aspek")}${cellStr("B" + r, "Catatan Klinis")}</row>`); r++;
-      SECTIONS.forEach(section => {
-        const note = notes[section.id];
-        rows.push(`<row r="${r}">${cellStr("A" + r, `${section.code} — ${section.label}`)}${cellStr("B" + r, note || "-")}</row>`);
-        r++;
-      });
-      r++; // blank
-      rows.push(`<row r="${r}"><c r="A${r}" t="inlineStr"><is><t>KESIMPULAN &amp; REKOMENDASI KLINIS</t></is></c></row>`); r++;
-      rows.push(`<row r="${r}">${cellStr("A" + r, kesimpulan || "(Belum diisi)")}</row>`); r++;
-      const sheet2 =
-        `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
-        `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">` +
-        `<cols><col min="1" max="1" width="34" customWidth="1"/><col min="2" max="2" width="70" customWidth="1"/></cols>` +
-        `<sheetData>${rows.join("")}</sheetData></worksheet>`;
-      zip.file("xl/worksheets/sheet2.xml", sheet2);
-
-      // register the new sheet in workbook.xml, its rels, and [Content_Types]
-      let wbxml = await zip.file("xl/workbook.xml").async("string");
-      wbxml = wbxml.replace("</sheets>", `<sheet xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" name="Catatan Klinis" sheetId="2" state="visible" r:id="rId4"/></sheets>`);
-      zip.file("xl/workbook.xml", wbxml);
-
-      let wbrels = await zip.file("xl/_rels/workbook.xml.rels").async("string");
-      wbrels = wbrels.replace("</Relationships>", `<Relationship Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml" Id="rId4"/></Relationships>`);
-      zip.file("xl/_rels/workbook.xml.rels", wbrels);
-
-      let ct = await zip.file("[Content_Types].xml").async("string");
-      ct = ct.replace("</Types>", `<Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>`);
-      zip.file("[Content_Types].xml", ct);
-
-      const outBlob = await zip.generateAsync({
-        type: "blob",
-        mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        compression: "DEFLATE",
-      });
-      const dateStr = new Date().toLocaleDateString("id-ID", { day: "2-digit", month: "long", year: "numeric" });
+      const outBlob = await buildFilledXlsxBlob();
       const url = URL.createObjectURL(outBlob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `ANB_Assessment_${(client.nama || "klien").replace(/\s+/g, "_")}_${client.tanggalAsesmen || dateStr}.xlsx`;
+      a.download = excelFileName();
       a.click();
       URL.revokeObjectURL(url);
     } catch (err) {
@@ -523,16 +522,45 @@ export default function ANBAssessment() {
     row.kesimpulan = kesimpulan;
 
     try {
-      await fetch(SHEET_WEBHOOK, {
-        method: "POST",
-        mode: "no-cors",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(row),
+      if (!isConfigured) throw new Error("Supabase belum dikonfigurasi (isi src/supabaseClient.js).");
+
+      // 1) Build the filled workbook and upload it to Storage.
+      let filePath = "";
+      try {
+        const blob = await buildFilledXlsxBlob();
+        const safe = (client.nama || "klien").replace(/[^\w\-]+/g, "_");
+        filePath = `OT/${safe}_${Date.now()}.xlsx`;
+        const up = await supabase.storage.from(STORAGE_BUCKET).upload(filePath, blob, {
+          contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          upsert: false,
+        });
+        if (up.error) { filePath = ""; } // non-fatal: keep the row even if the file fails
+      } catch (fileErr) {
+        filePath = "";
+      }
+
+      // 2) Insert the assessment row (promoted columns + full JSONB payload).
+      const { error } = await supabase.from("assessments").insert({
+        type: "OT",
+        client_name: client.nama || null,
+        client_no: client.noClient || null,
+        usia: client.usia || null,
+        jenis_kelamin: client.jenisKelamin || null,
+        diagnosis: client.diagnosis || null,
+        asesor: client.asesor || null,
+        assessment_date: client.tanggalAsesmen || null,
+        total_score: totalSkor ?? null,
+        kesimpulan: kesimpulan || null,
+        data: row,
+        file_path: filePath || null,
       });
+      if (error) throw error;
+
       generatePDF();
       setSubmitted(true);
     } catch (e) {
-      setSubmitError("Gagal mengirim ke Google Sheets. Cek koneksi internet dan URL webhook.");
+      generatePDF();
+      setSubmitError("Laporan tetap terunduh, tapi gagal menyimpan ke database: " + (e && e.message ? e.message : "unknown"));
     } finally {
       setSubmitting(false);
     }
