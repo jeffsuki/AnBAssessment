@@ -95,7 +95,7 @@ function vbmappLevelTotal(entry, levelId) {
 // from a saved entry's data (mirrors the assessment tool's own Rekap grid).
 function VbmappGridMini({ entry }) {
   const round = TEST_ROUNDS.find(r => r.value === entry.test_round) || TEST_ROUNDS[0];
-  const CELL = 22, LABEL = 26;
+  const CELL = 40, LABEL = 26;
   return (
     <div style={{ overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
       <table style={{ borderCollapse: "collapse", tableLayout: "fixed" }}>
@@ -103,8 +103,8 @@ function VbmappGridMini({ entry }) {
           <tr>
             <th style={{ width: LABEL }} />
             {GRID_COLS.map(code => (
-              <th key={code} style={{ width: CELL, height: 54, verticalAlign: "bottom", padding: 0 }}>
-                <div style={{ writingMode: "vertical-rl", transform: "rotate(180deg)", fontSize: 8, fontWeight: 700, color: "#4A5568", margin: "0 auto 3px" }}>{code}</div>
+              <th key={code} style={{ width: CELL, height: 34, verticalAlign: "middle", padding: "0 2px" }}>
+                <div style={{ fontSize: 8, fontWeight: 700, color: "#4A5568", lineHeight: 1.1, textAlign: "center", wordBreak: "break-word" }}>{code}</div>
               </th>
             ))}
           </tr>
@@ -167,6 +167,12 @@ export default function Dashboard() {
     const { data } = supabase.storage.from(STORAGE_BUCKET).getPublicUrl(entry.file_path);
     return data ? data.publicUrl : "";
   };
+  // Same, for the branded Word report ("Laporan").
+  const reportUrlFor = entry => {
+    if (!entry.report_docx_path) return "";
+    const { data } = supabase.storage.from(STORAGE_BUCKET).getPublicUrl(entry.report_docx_path);
+    return data ? data.publicUrl : "";
+  };
 
   const types = ["ALL", ...Array.from(new Set((entries || []).map(e => e.type)))];
   const filtered = (entries || []).filter(e => {
@@ -219,16 +225,25 @@ export default function Dashboard() {
                 </div>
               ))}
             </div>
-            {fileUrlFor(e) ? (
-              <a href={fileUrlFor(e)} target="_blank" rel="noreferrer"
-                style={{ display: "inline-block", marginTop: 14, background: "#EBF8FF", color: "#2B6CB0", border: "1.5px solid #90CDF4", borderRadius: 8, padding: "8px 14px", fontSize: 13, fontWeight: 700, textDecoration: "none" }}>
-                ⬇️ Download file
-              </a>
-            ) : (
-              <div style={{ marginTop: 14, fontSize: 12, color: "#A0AEC0", fontStyle: "italic" }}>
-                Tidak ada file tersimpan untuk entri ini.
-              </div>
-            )}
+            <div style={{ display: "flex", gap: 10, marginTop: 14, flexWrap: "wrap" }}>
+              {fileUrlFor(e) && (
+                <a href={fileUrlFor(e)} target="_blank" rel="noreferrer"
+                  style={{ display: "inline-block", background: "#EBF8FF", color: "#2B6CB0", border: "1.5px solid #90CDF4", borderRadius: 8, padding: "8px 14px", fontSize: 13, fontWeight: 700, textDecoration: "none" }}>
+                  ⬇️ Download data (Excel)
+                </a>
+              )}
+              {reportUrlFor(e) && (
+                <a href={reportUrlFor(e)} target="_blank" rel="noreferrer"
+                  style={{ display: "inline-block", background: "#EBF8FF", color: "#1E75BC", border: "1.5px solid #90CDF4", borderRadius: 8, padding: "8px 14px", fontSize: 13, fontWeight: 700, textDecoration: "none" }}>
+                  📝 Download Laporan
+                </a>
+              )}
+              {!fileUrlFor(e) && !reportUrlFor(e) && (
+                <div style={{ fontSize: 12, color: "#A0AEC0", fontStyle: "italic" }}>
+                  Tidak ada file tersimpan untuk entri ini.
+                </div>
+              )}
+            </div>
           </div>
 
           {/* Rekap — rendered per assessment type */}
@@ -365,6 +380,7 @@ export default function Dashboard() {
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {sorted.map((e, i) => {
               const url = fileUrlFor(e);
+              const reportUrl = reportUrlFor(e);
               return (
                 <div key={i} role="button" tabIndex={0}
                   onClick={() => setSelected(e)}
@@ -381,9 +397,16 @@ export default function Dashboard() {
                   )}
                   {url && (
                     <a href={url} target="_blank" rel="noreferrer" onClick={ev => ev.stopPropagation()}
-                      title="Download file"
+                      title="Download data (Excel)"
                       style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 32, height: 32, borderRadius: 8, background: "#EBF8FF", color: "#2B6CB0", textDecoration: "none", fontSize: 15, flex: "none" }}>
                       ⬇️
+                    </a>
+                  )}
+                  {reportUrl && (
+                    <a href={reportUrl} target="_blank" rel="noreferrer" onClick={ev => ev.stopPropagation()}
+                      title="Download Laporan (Word)"
+                      style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 32, height: 32, borderRadius: 8, background: "#EBF8FF", color: "#1E75BC", textDecoration: "none", fontSize: 15, flex: "none" }}>
+                      📝
                     </a>
                   )}
                   <span style={{ color: "#CBD5E0", fontSize: 18 }}>›</span>

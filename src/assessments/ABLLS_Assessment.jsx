@@ -550,6 +550,21 @@ export default function ABLLSAssessment() {
         filePath = "";
       }
 
+      // Build the branded Word report ("Laporan") and upload it too.
+      let reportPath = "";
+      try {
+        const wblob = await buildABLLSWordBlob(buildXlsxCfg());
+        const safe = (client.nama || "klien").replace(/[^\w\-]+/g, "_");
+        reportPath = `ABLLS/${safe}_${Date.now()}_laporan.docx`;
+        const up2 = await supabase.storage.from(STORAGE_BUCKET).upload(reportPath, wblob, {
+          contentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+          upsert: false,
+        });
+        if (up2.error) reportPath = "";
+      } catch (wordErr) {
+        reportPath = "";
+      }
+
       const { error } = await supabase.from("assessments").insert({
         type: "ABLLS",
         client_name: client.nama || null,
@@ -565,6 +580,7 @@ export default function ABLLSAssessment() {
         kesimpulan: kesimpulan || null,
         data,
         file_path: filePath || null,
+        report_docx_path: reportPath || null,
       });
       if (error) throw error;
       setSaveMsg("Tersimpan ke database. Entri muncul di Dashboard.");

@@ -718,7 +718,7 @@ function gridCell(code, n, scores, eesa, invalidItems) {
 }
 
 function MilestoneGrid({ scores, roundFull, roundHalf, eesa, invalidItems }) {
-  const CELL = 26, LABEL = 30, HEAD = 78;
+  const CELL = 44, LABEL = 30, HEAD = 46;
   const HATCH = "repeating-linear-gradient(45deg,#F7FAFC,#F7FAFC 3px,#EDF2F7 3px,#EDF2F7 6px)";
   return (
     <div style={{ display: "flex", gap: 8 }}>
@@ -733,8 +733,8 @@ function MilestoneGrid({ scores, roundFull, roundHalf, eesa, invalidItems }) {
             <tr>
               <th style={{ width: LABEL, height: HEAD }} />
               {GRID_COLS.map(code => (
-                <th key={code} style={{ width: CELL, height: HEAD, verticalAlign: "bottom", padding: 0 }}>
-                  <div style={{ writingMode: "vertical-rl", transform: "rotate(180deg)", fontSize: 10, fontWeight: 700, color: "#4A5568", margin: "0 auto 4px", whiteSpace: "nowrap" }}>{code}</div>
+                <th key={code} style={{ width: CELL, height: HEAD, verticalAlign: "middle", padding: "0 2px" }}>
+                  <div style={{ fontSize: 9, fontWeight: 700, color: "#4A5568", lineHeight: 1.15, textAlign: "center", wordBreak: "break-word" }}>{code}</div>
                 </th>
               ))}
             </tr>
@@ -946,26 +946,7 @@ export default function VBMappAssessment() {
     setWordBusy(true);
     setXlsxError("");
     try {
-      const cfg = {
-        client, testRound,
-        eesaGroups: EESA_GROUPS.map(g => ({ name: g.name, score: eesaGroupScore(eesa, g) })),
-        eesaTotal: eesaTotal(eesa),
-        levels: LEVELS.map(lv => ({
-          id: lv.id, label: lv.label, range: lv.range,
-          total: levelTotal(scores, lv, eesa, invalidItems),
-          max: levelMax(lv, invalidItems),
-          domains: lv.domains.map(d => ({
-            code: d.code, name: d.name, disabled: !!d.disabled,
-            items: d.items.map(it => ({
-              n: it.n, text: it.text,
-              invalid: isItemInvalid(lv.id, d.code, it.n, invalidItems),
-              score: scoreOf(lv.id, d.code, it, scores, eesa),
-              data: isEchoic(d.code) ? eesaTotal(eesa) : capDisplay(getCap(lv.id, d.code, it.n), scores[keyFor(lv.id, d.code, it.n)]),
-            })),
-          })),
-        })),
-        grandTotal, grandMax: GRAND_MAX, kesimpulan,
-      };
+      const cfg = buildXlsxCfg();
       const blob = await buildVbmappWordBlob(cfg);
       const dateStr = new Date().toLocaleDateString("id-ID", { day: "2-digit", month: "long", year: "numeric" });
       const url = URL.createObjectURL(blob);
@@ -1032,6 +1013,22 @@ export default function VBMappAssessment() {
         filePath = "";
       }
 
+      // Build the branded Word report ("Laporan" with the grafik) and upload
+      // it too, using the same cfg the download button uses.
+      let reportPath = "";
+      try {
+        const wblob = await buildVbmappWordBlob(buildXlsxCfg());
+        const safe = (client.nama || "klien").replace(/[^\w\-]+/g, "_");
+        reportPath = `VBMAPP/${safe}_${Date.now()}_laporan.docx`;
+        const up2 = await supabase.storage.from(STORAGE_BUCKET).upload(reportPath, wblob, {
+          contentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+          upsert: false,
+        });
+        if (up2.error) reportPath = "";
+      } catch (wordErr) {
+        reportPath = "";
+      }
+
       const { error } = await supabase.from("assessments").insert({
         type: "VBMAPP",
         client_name: client.nama || null,
@@ -1047,6 +1044,7 @@ export default function VBMappAssessment() {
         kesimpulan: kesimpulan || null,
         data: row,
         file_path: filePath || null,
+        report_docx_path: reportPath || null,
       });
       if (error) throw error;
       generateReport();

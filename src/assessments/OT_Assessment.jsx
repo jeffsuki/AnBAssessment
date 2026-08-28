@@ -491,30 +491,34 @@ export default function ANBAssessment() {
     }
   }
 
+  function buildWordCfg() {
+    return {
+      client, testRound,
+      sections: SECTIONS.map(section => {
+        const total = sectionTotal(scores, section.id);
+        const flag = sectionFlag(total, section);
+        return {
+          code: section.code, name: section.label, total, max: section.max,
+          flagLabel: flag ? flag.label : null,
+          catatan: notes[section.id] || "",
+          items: section.items.map((text, i) => ({
+            n: i + 1, text,
+            score: scores[`${section.id}_${i}`] || 0,
+            data: SCALE.find(s => s.value === Number(scores[`${section.id}_${i}`]))?.label || "",
+          })),
+        };
+      }),
+      totalGot: SECTIONS.reduce((s, sec) => s + sectionTotal(scores, sec.id), 0),
+      totalMax: SECTIONS.reduce((s, sec) => s + sec.max, 0),
+      kesimpulan,
+    };
+  }
+
   async function downloadWordReport() {
     setWordBusy(true);
     setXlsxError("");
     try {
-      const cfg = {
-        client, testRound,
-        sections: SECTIONS.map(section => {
-          const total = sectionTotal(scores, section.id);
-          const flag = sectionFlag(total, section);
-          return {
-            code: section.code, name: section.label, total, max: section.max,
-            flagLabel: flag ? flag.label : null,
-            catatan: notes[section.id] || "",
-            items: section.items.map((text, i) => ({
-              n: i + 1, text,
-              score: scores[`${section.id}_${i}`] || 0,
-              data: SCALE.find(s => s.value === Number(scores[`${section.id}_${i}`]))?.label || "",
-            })),
-          };
-        }),
-        totalGot: SECTIONS.reduce((s, sec) => s + sectionTotal(scores, sec.id), 0),
-        totalMax: SECTIONS.reduce((s, sec) => s + sec.max, 0),
-        kesimpulan,
-      };
+      const cfg = buildWordCfg();
       const blob = await buildOTWordBlob(cfg);
       const date = new Date().toLocaleDateString("id-ID", { day: "2-digit", month: "long", year: "numeric" });
       const url = URL.createObjectURL(blob);
@@ -580,7 +584,23 @@ export default function ANBAssessment() {
         filePath = "";
       }
 
-      // 2) Insert the assessment row (promoted columns + full JSONB payload).
+      // 2) Build the branded Word report ("Laporan") and upload it too, so the
+      //    entry is downloadable as both a data file and a polished report.
+      let reportPath = "";
+      try {
+        const wblob = await buildOTWordBlob(buildWordCfg());
+        const safe = (client.nama || "klien").replace(/[^\w\-]+/g, "_");
+        reportPath = `OT/${safe}_${Date.now()}_laporan.docx`;
+        const up2 = await supabase.storage.from(STORAGE_BUCKET).upload(reportPath, wblob, {
+          contentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+          upsert: false,
+        });
+        if (up2.error) reportPath = "";
+      } catch (wordErr) {
+        reportPath = "";
+      }
+
+      // 3) Insert the assessment row (promoted columns + full JSONB payload).
       const { error } = await supabase.from("assessments").insert({
         type: "OT",
         client_name: client.nama || null,
@@ -594,6 +614,7 @@ export default function ANBAssessment() {
         kesimpulan: kesimpulan || null,
         data: row,
         file_path: filePath || null,
+        report_docx_path: reportPath || null,
       });
       if (error) throw error;
 
