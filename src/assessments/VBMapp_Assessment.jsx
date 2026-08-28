@@ -1,5 +1,6 @@
 import { useState, useCallback, useMemo } from "react";
-import { supabase, isConfigured } from "../supabaseClient.js";
+import { supabase, isConfigured, STORAGE_BUCKET } from "../supabaseClient.js";
+import { buildVbmappWordBlob } from "./wordReport_VBMapp.js";
 import { buildVbmappXlsxBlob } from "./reportBuilders.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -17,7 +18,7 @@ const SCALE = [
 
 // Colors follow the standard VB-MAPP Master Scoring Form convention.
 // Tes ke-4 has no official color in the standard (rarely reached in practice) — chosen freely.
-const TEST_ROUNDS = [
+export const TEST_ROUNDS = [
   { value: 1, label: "Tes ke-1", color: "#FF9900", half: "#FFD89E" },
   { value: 2, label: "Tes ke-2", color: "#9BBB59", half: "#D9E5C0" },
   { value: 3, label: "Tes ke-3", color: "#4F81BD", half: "#BCCFE6" },
@@ -685,14 +686,22 @@ function MilestoneInput({ levelId, code, item, scores, setScore, eesa, goEesa })
 // ── MILESTONES GRID (VB-MAPP master scoring form) ─────────────────────────────
 // 16 skill areas across the x-axis (fixed positions), milestones 1–15 up the
 // y-axis. Cells greyed where a domain has no milestone at that level.
-const GRID_COLS = [
+export const GRID_COLS = [
   "Mand", "Tact", "Listener", "VP-MTS", "Play", "Social",
   "Imitation", "Echoic", "Vocal", "LRFFC", "IV", "Group",
   "Ling", "Reading", "Writing", "Math",
 ];
-const GRID_ROWS = [15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1];
-const levelOf = n => (n <= 5 ? "L1" : n <= 10 ? "L2" : "L3");
-const BAND_TINT = { L1: "#EBF8FF", L2: "#FEFCBF", L3: "#FED7D7" };
+export const GRID_ROWS = [15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1];
+export const levelOf = n => (n <= 5 ? "L1" : n <= 10 ? "L2" : "L3");
+export const BAND_TINT = { L1: "#EBF8FF", L2: "#FEFCBF", L3: "#FED7D7" };
+
+// Lightweight structural summary of LEVELS (no item text/CAP data) so the
+// Dashboard can reconstruct which domains exist per level without importing
+// the full milestone dataset.
+export const LEVELS_META = LEVELS.map(lv => ({
+  id: lv.id, label: lv.label, range: lv.range,
+  domains: lv.domains.map(d => ({ code: d.code, disabled: !!d.disabled })),
+}));
 
 function gridCell(code, n, scores, eesa, invalidItems) {
   const lid = levelOf(n);
@@ -782,6 +791,7 @@ export default function VBMappAssessment() {
   const [submitted, setSubmitted] = useState(false);
   const [submitError, setSubmitError] = useState("");
   const [xlsxBusy, setXlsxBusy] = useState(false);
+  const [wordBusy, setWordBusy] = useState(false);
   const [xlsxError, setXlsxError] = useState("");
 
   const setScore = useCallback((k, v) => setScores(prev => ({ ...prev, [k]: v })), []);
@@ -886,33 +896,37 @@ export default function VBMappAssessment() {
   // there. Test it once the .jsx is running in your own hosted app.
   const argb = hex => "FF" + hex.replace("#", "").toUpperCase();
 
+  function buildXlsxCfg() {
+    return {
+      client, testRound, roundColor, roundHalf,
+      GRID_COLS, GRID_ROWS, levelOf, BAND_TINT,
+      cell: (code, n) => gridCell(code, n, scores, eesa, invalidItems),
+      eesaGroups: EESA_GROUPS.map(g => ({ name: g.name, score: eesaGroupScore(eesa, g) })),
+      eesaTotal: eesaTotal(eesa),
+      levels: LEVELS.map(lv => ({
+        id: lv.id, label: lv.label, range: lv.range,
+        total: levelTotal(scores, lv, eesa, invalidItems),
+        max: levelMax(lv, invalidItems),
+        domains: lv.domains.map(d => ({
+          code: d.code, name: d.name, disabled: !!d.disabled,
+          items: d.items.map(it => ({
+            n: it.n, text: it.text,
+            invalid: isItemInvalid(lv.id, d.code, it.n, invalidItems),
+            score: scoreOf(lv.id, d.code, it, scores, eesa),
+            answered: answeredOf(lv.id, d.code, it, scores, eesa),
+            data: isEchoic(d.code) ? eesaTotal(eesa) : capDisplay(getCap(lv.id, d.code, it.n), scores[keyFor(lv.id, d.code, it.n)]),
+          })),
+        })),
+      })),
+      grandTotal, grandMax: GRAND_MAX, kesimpulan,
+    };
+  }
+
   async function downloadExcel() {
     setXlsxBusy(true);
     setXlsxError("");
     try {
-      const cfg = {
-        client, testRound, roundColor, roundHalf,
-        GRID_COLS, GRID_ROWS, levelOf, BAND_TINT,
-        cell: (code, n) => gridCell(code, n, scores, eesa, invalidItems),
-        eesaGroups: EESA_GROUPS.map(g => ({ name: g.name, score: eesaGroupScore(eesa, g) })),
-        eesaTotal: eesaTotal(eesa),
-        levels: LEVELS.map(lv => ({
-          id: lv.id, label: lv.label, range: lv.range,
-          total: levelTotal(scores, lv, eesa, invalidItems),
-          max: levelMax(lv, invalidItems),
-          domains: lv.domains.map(d => ({
-            code: d.code, name: d.name, disabled: !!d.disabled,
-            items: d.items.map(it => ({
-              n: it.n, text: it.text,
-              invalid: isItemInvalid(lv.id, d.code, it.n, invalidItems),
-              score: scoreOf(lv.id, d.code, it, scores, eesa),
-              answered: answeredOf(lv.id, d.code, it, scores, eesa),
-              data: isEchoic(d.code) ? eesaTotal(eesa) : capDisplay(getCap(lv.id, d.code, it.n), scores[keyFor(lv.id, d.code, it.n)]),
-            })),
-          })),
-        })),
-        grandTotal, grandMax: GRAND_MAX, kesimpulan,
-      };
+      const cfg = buildXlsxCfg();
       const blob = await buildVbmappXlsxBlob(cfg);
       const dateStr = new Date().toLocaleDateString("id-ID", { day: "2-digit", month: "long", year: "numeric" });
       const url = URL.createObjectURL(blob);
@@ -925,6 +939,45 @@ export default function VBMappAssessment() {
       setXlsxError("Gagal membuat file Excel: " + (err && err.message ? err.message : "unknown"));
     } finally {
       setXlsxBusy(false);
+    }
+  }
+
+  async function downloadWordReport() {
+    setWordBusy(true);
+    setXlsxError("");
+    try {
+      const cfg = {
+        client, testRound,
+        eesaGroups: EESA_GROUPS.map(g => ({ name: g.name, score: eesaGroupScore(eesa, g) })),
+        eesaTotal: eesaTotal(eesa),
+        levels: LEVELS.map(lv => ({
+          id: lv.id, label: lv.label, range: lv.range,
+          total: levelTotal(scores, lv, eesa, invalidItems),
+          max: levelMax(lv, invalidItems),
+          domains: lv.domains.map(d => ({
+            code: d.code, name: d.name, disabled: !!d.disabled,
+            items: d.items.map(it => ({
+              n: it.n, text: it.text,
+              invalid: isItemInvalid(lv.id, d.code, it.n, invalidItems),
+              score: scoreOf(lv.id, d.code, it, scores, eesa),
+              data: isEchoic(d.code) ? eesaTotal(eesa) : capDisplay(getCap(lv.id, d.code, it.n), scores[keyFor(lv.id, d.code, it.n)]),
+            })),
+          })),
+        })),
+        grandTotal, grandMax: GRAND_MAX, kesimpulan,
+      };
+      const blob = await buildVbmappWordBlob(cfg);
+      const dateStr = new Date().toLocaleDateString("id-ID", { day: "2-digit", month: "long", year: "numeric" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `VBMapp_Laporan_${(client.nama || "klien").replace(/\s+/g, "_")}_Tes${testRound}_${client.tanggalAsesmen || dateStr}.docx`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setXlsxError("Gagal membuat laporan Word: " + (err && err.message ? err.message : "unknown"));
+    } finally {
+      setWordBusy(false);
     }
   }
 
@@ -962,6 +1015,23 @@ export default function VBMappAssessment() {
 
     try {
       if (!isConfigured) throw new Error("Supabase belum dikonfigurasi (isi src/supabaseClient.js).");
+
+      // Build the same Excel report the download button produces, and store it
+      // so every entry has a downloadable file, same as OT.
+      let filePath = "";
+      try {
+        const blob = await buildVbmappXlsxBlob(buildXlsxCfg());
+        const safe = (client.nama || "klien").replace(/[^\w\-]+/g, "_");
+        filePath = `VBMAPP/${safe}_${Date.now()}.xlsx`;
+        const up = await supabase.storage.from(STORAGE_BUCKET).upload(filePath, blob, {
+          contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          upsert: false,
+        });
+        if (up.error) filePath = ""; // non-fatal: keep the row even if the file fails
+      } catch (fileErr) {
+        filePath = "";
+      }
+
       const { error } = await supabase.from("assessments").insert({
         type: "VBMAPP",
         client_name: client.nama || null,
@@ -976,6 +1046,7 @@ export default function VBMappAssessment() {
         max_score: GRAND_MAX ?? null,
         kesimpulan: kesimpulan || null,
         data: row,
+        file_path: filePath || null,
       });
       if (error) throw error;
       generateReport();
@@ -1306,6 +1377,10 @@ export default function VBMappAssessment() {
               <button onClick={downloadExcel} disabled={xlsxBusy}
                 style={{ flex: 1, background: xlsxBusy ? "#A0AEC0" : "#2B6CB0", color: "#fff", border: "none", borderRadius: 10, padding: "14px 20px", fontSize: 14, fontWeight: 700, cursor: xlsxBusy ? "not-allowed" : "pointer" }}>
                 {xlsxBusy ? "Membuat..." : "📊 Excel (Grafik)"}
+              </button>
+              <button onClick={downloadWordReport} disabled={wordBusy}
+                style={{ flex: 1, background: wordBusy ? "#A0AEC0" : "#1E75BC", color: "#fff", border: "none", borderRadius: 10, padding: "14px 20px", fontSize: 14, fontWeight: 700, cursor: wordBusy ? "not-allowed" : "pointer" }}>
+                {wordBusy ? "Membuat..." : "📝 Laporan (Word)"}
               </button>
             </div>
             <button onClick={handleSubmit} disabled={submitting}

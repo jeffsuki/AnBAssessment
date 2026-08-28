@@ -2,6 +2,7 @@ import { useState, useCallback } from "react";
 import JSZip from "jszip";
 import templateUrl from "./ot_template.xlsx?url";
 import { supabase, STORAGE_BUCKET, isConfigured } from "../supabaseClient.js";
+import { buildOTWordBlob } from "./wordReport_OT.js";
 
 // ── DATA ──────────────────────────────────────────────────────────────────────
 
@@ -274,6 +275,7 @@ export default function ANBAssessment() {
   const [submitted, setSubmitted] = useState(false);
   const [submitError, setSubmitError] = useState("");
   const [xlsxBusy, setXlsxBusy] = useState(false);
+  const [wordBusy, setWordBusy] = useState(false);
   const [xlsxError, setXlsxError] = useState("");
 
   const setScore = useCallback((key, value) => {
@@ -486,6 +488,45 @@ export default function ANBAssessment() {
       setXlsxError("Gagal membuat file Excel: " + (err && err.message ? err.message : "unknown"));
     } finally {
       setXlsxBusy(false);
+    }
+  }
+
+  async function downloadWordReport() {
+    setWordBusy(true);
+    setXlsxError("");
+    try {
+      const cfg = {
+        client, testRound,
+        sections: SECTIONS.map(section => {
+          const total = sectionTotal(scores, section.id);
+          const flag = sectionFlag(total, section);
+          return {
+            code: section.code, name: section.label, total, max: section.max,
+            flagLabel: flag ? flag.label : null,
+            catatan: notes[section.id] || "",
+            items: section.items.map((text, i) => ({
+              n: i + 1, text,
+              score: scores[`${section.id}_${i}`] || 0,
+              data: SCALE.find(s => s.value === Number(scores[`${section.id}_${i}`]))?.label || "",
+            })),
+          };
+        }),
+        totalGot: SECTIONS.reduce((s, sec) => s + sectionTotal(scores, sec.id), 0),
+        totalMax: SECTIONS.reduce((s, sec) => s + sec.max, 0),
+        kesimpulan,
+      };
+      const blob = await buildOTWordBlob(cfg);
+      const date = new Date().toLocaleDateString("id-ID", { day: "2-digit", month: "long", year: "numeric" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `ANB_Laporan_${(client.nama || "klien").replace(/\s+/g, "_")}_${client.tanggalAsesmen || date}.docx`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setXlsxError("Gagal membuat laporan Word: " + (err && err.message ? err.message : "unknown"));
+    } finally {
+      setWordBusy(false);
     }
   }
 
@@ -871,6 +912,13 @@ export default function ANBAssessment() {
                 style={{ flex: 1, background: xlsxBusy ? "#A0AEC0" : "#2B6CB0", color: "#fff", border: "none", borderRadius: 10, padding: "14px 20px", fontSize: 14, fontWeight: 700, cursor: xlsxBusy ? "not-allowed" : "pointer" }}
               >
                 {xlsxBusy ? "Membuat..." : "📊 Excel (Form)"}
+              </button>
+              <button
+                onClick={downloadWordReport}
+                disabled={wordBusy}
+                style={{ flex: 1, background: wordBusy ? "#A0AEC0" : "#1E75BC", color: "#fff", border: "none", borderRadius: 10, padding: "14px 20px", fontSize: 14, fontWeight: 700, cursor: wordBusy ? "not-allowed" : "pointer" }}
+              >
+                {wordBusy ? "Membuat..." : "📝 Laporan (Word)"}
               </button>
             </div>
             <button

@@ -1,5 +1,25 @@
 import { useState, useEffect, useCallback } from "react";
 import { supabase, STORAGE_BUCKET, isConfigured } from "./supabaseClient.js";
+import { GRID_COLS, GRID_ROWS, levelOf, BAND_TINT, TEST_ROUNDS, LEVELS_META } from "./assessments/VBMapp_Assessment.jsx";
+
+// OT section maxes are static constants in OT_Assessment.jsx (SECTIONS[].max);
+// duplicated here (small, 10 numbers) since OT doesn't store max per entry.
+// Keep in sync if OT_Assessment.jsx's SECTIONS maxes ever change.
+const OT_SECTION_MAX = { S1: 35, S2: 20, S3: 15, S4: 35, S5: 35, S6: 30, S7: 20, S8: 35, S9: 35, S10: 35 };
+const OT_SECTION_LABEL = {
+  S1: "Tactile Sensitivity", S2: "Taste / Smell", S3: "Vestibular / Movement",
+  S4: "Underresponsive", S5: "Auditory Filtering", S6: "Low Energy",
+  S7: "Visual / Auditory", S8: "Gross Motor", S9: "Fine Motor", S10: "Arousal & Self-Regulation",
+};
+
+// ABLLS group names are defined in ABLLS_Assessment.jsx's GROUPS array; duplicated
+// here (small, 11 entries) so the dashboard doesn't need to import that whole module.
+const ABLLS_GROUP_NAME = {
+  G1: "Dasar & Isian", G2: "WH — Rumah & Sekolah", G3: "Kelas, Ciri & Kategori",
+  G4: "Recall & Komentar Visual", G5: "Lingkungan / Komunitas", G6: "WH Lanjutan",
+  G7: "Sekuens & Deskripsi", G8: "Ya/Tidak & Multi-komponen", G9: "Peristiwa & Percakapan",
+  G10: "Emosi", G11: "Perspective Taking",
+};
 
 const FLAG_COLOR = {
   Definitif: "#E53E3E",
@@ -22,22 +42,92 @@ function fmtDate(v) {
 }
 
 // Group the flat JSONB payload into section blocks: S1_1..S1_n, S1_total, S1_flag, S1_catatan
-function sectionsOf(entry) {
+// ── OT: reconstruct per-aspect table from saved keys S{n}_total/_flag/_catatan ──
+function otSectionsOf(entry) {
   const flat = entry.data || {};
-  const secs = {};
-  Object.keys(flat).forEach(k => {
-    const m = k.match(/^([A-Za-z]+\d+)_(.+)$/);
-    if (!m) return;
-    const code = m[1];
-    const rest = m[2];
-    secs[code] = secs[code] || { code, items: [], total: undefined, flag: undefined, catatan: undefined };
-    if (rest === "total") secs[code].total = flat[k];
-    else if (rest === "flag") secs[code].flag = flat[k];
-    else if (rest === "catatan") secs[code].catatan = flat[k];
-    else if (/^\d+$/.test(rest)) secs[code].items.push({ n: parseInt(rest), v: flat[k] });
-  });
-  Object.values(secs).forEach(s => s.items.sort((a, b) => a.n - b.n));
-  return Object.values(secs).sort((a, b) => a.code.localeCompare(b.code, undefined, { numeric: true }));
+  return Object.keys(OT_SECTION_MAX)
+    .filter(code => flat[`${code}_total`] !== undefined)
+    .map(code => ({
+      code, name: OT_SECTION_LABEL[code] || code,
+      total: flat[`${code}_total`], max: OT_SECTION_MAX[code],
+      flag: flat[`${code}_flag`] || null,
+      catatan: flat[`${code}_catatan`] || "",
+    }));
+}
+
+// ── ABLLS: reconstruct per-group table from saved keys G{n}_total/_max/_catatan ──
+function abllsGroupsOf(entry) {
+  const flat = entry.data || {};
+  const codes = Object.keys(flat)
+    .map(k => k.match(/^([A-Za-z]+\d+)_total$/))
+    .filter(Boolean)
+    .map(m => m[1]);
+  return codes
+    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
+    .map(code => ({
+      code, name: ABLLS_GROUP_NAME[code] || code,
+      total: flat[`${code}_total`], max: flat[`${code}_max`],
+      catatan: flat[`${code}_catatan`] || "",
+    }));
+}
+
+// ── VB-MAPP: reconstruct the pyramid grid from saved keys L{lv}_{domain}_{n} ──
+function vbmappCell(entry, levelId, domainCode, n) {
+  const flat = entry.data || {};
+  const levelMeta = LEVELS_META.find(l => l.id === levelId);
+  const domainMeta = levelMeta && levelMeta.domains.find(d => d.code === domainCode);
+  if (!domainMeta) return { exists: false };
+  if (domainMeta.disabled) return { exists: true, disabled: true };
+  const key = `${levelId}_${domainCode}_${n}`;
+  const v = flat[key];
+  if (v === undefined) return { exists: true, disabled: false, answered: false };
+  if (v === "tidak_dapat_diuji") return { exists: true, disabled: true };
+  const score = Number(v);
+  return { exists: true, disabled: false, answered: true, score };
+}
+
+function vbmappLevelTotal(entry, levelId) {
+  const flat = entry.data || {};
+  return flat[`${levelId}_total`];
+}
+
+// Compact read-only pyramid grid for the dashboard detail view, reconstructed
+// from a saved entry's data (mirrors the assessment tool's own Rekap grid).
+function VbmappGridMini({ entry }) {
+  const round = TEST_ROUNDS.find(r => r.value === entry.test_round) || TEST_ROUNDS[0];
+  const CELL = 22, LABEL = 26;
+  return (
+    <div style={{ overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
+      <table style={{ borderCollapse: "collapse", tableLayout: "fixed" }}>
+        <thead>
+          <tr>
+            <th style={{ width: LABEL }} />
+            {GRID_COLS.map(code => (
+              <th key={code} style={{ width: CELL, height: 54, verticalAlign: "bottom", padding: 0 }}>
+                <div style={{ writingMode: "vertical-rl", transform: "rotate(180deg)", fontSize: 8, fontWeight: 700, color: "#4A5568", margin: "0 auto 3px" }}>{code}</div>
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {GRID_ROWS.map(n => (
+            <tr key={n}>
+              <td style={{ width: LABEL, textAlign: "center", fontSize: 9, fontWeight: 700, color: "#4A5568", background: BAND_TINT[levelOf(n)], border: "1px solid #E2E8F0" }}>{n}</td>
+              {GRID_COLS.map(code => {
+                const c = vbmappCell(entry, levelOf(n), code, n);
+                let bg = "#fff";
+                if (!c.exists) bg = "#E2E8F0";
+                else if (c.disabled) bg = "repeating-linear-gradient(45deg,#F7FAFC,#F7FAFC 2px,#EDF2F7 2px,#EDF2F7 4px)";
+                else if (c.answered && c.score >= 1) bg = round.color;
+                else if (c.answered && c.score >= 0.5) bg = round.half;
+                return <td key={code} style={{ width: CELL, height: CELL, border: "1px solid #E2E8F0", background: bg }} />;
+              })}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
 }
 
 export default function Dashboard() {
@@ -46,6 +136,8 @@ export default function Dashboard() {
   const [selected, setSelected] = useState(null);
   const [query, setQuery] = useState("");
   const [typeFilter, setTypeFilter] = useState("ALL");
+  const [sortBy, setSortBy] = useState("date"); // "date" | "name"
+  const [sortDir, setSortDir] = useState("desc"); // "asc" | "desc"
 
   const load = useCallback(async () => {
     setEntries(null);
@@ -84,10 +176,21 @@ export default function Dashboard() {
     return hay.includes(query.toLowerCase());
   });
 
+  const sorted = [...filtered].sort((a, b) => {
+    let cmp;
+    if (sortBy === "name") {
+      cmp = nameOf(a).localeCompare(nameOf(b), "id", { sensitivity: "base" });
+    } else {
+      const da = new Date(dateOf(a) || 0).getTime() || 0;
+      const db = new Date(dateOf(b) || 0).getTime() || 0;
+      cmp = da - db;
+    }
+    return sortDir === "asc" ? cmp : -cmp;
+  });
+
   // ── DETAIL VIEW ──────────────────────────────────────────────────────────────
   if (selected) {
     const e = selected;
-    const secs = sectionsOf(e);
     return (
       <div style={{ minHeight: "100vh", background: "#EBF4FF", fontFamily: "'Segoe UI', system-ui, sans-serif" }}>
         <div style={{ background: "#2B6CB0", padding: "14px 20px", display: "flex", alignItems: "center", gap: 14 }}>
@@ -116,39 +219,91 @@ export default function Dashboard() {
                 </div>
               ))}
             </div>
-            {fileUrlFor(e) && (
+            {fileUrlFor(e) ? (
               <a href={fileUrlFor(e)} target="_blank" rel="noreferrer"
                 style={{ display: "inline-block", marginTop: 14, background: "#EBF8FF", color: "#2B6CB0", border: "1.5px solid #90CDF4", borderRadius: 8, padding: "8px 14px", fontSize: 13, fontWeight: 700, textDecoration: "none" }}>
-                📄 Buka file form (Excel)
+                ⬇️ Download file
               </a>
+            ) : (
+              <div style={{ marginTop: 14, fontSize: 12, color: "#A0AEC0", fontStyle: "italic" }}>
+                Tidak ada file tersimpan untuk entri ini.
+              </div>
             )}
           </div>
 
-          {/* Section scores */}
-          {secs.length > 0 && (
+          {/* Rekap — rendered per assessment type */}
+          {e.type === "VBMAPP" && (
             <div style={{ background: "#fff", borderRadius: 12, padding: 20, boxShadow: "0 1px 8px rgba(0,0,0,0.06)", marginBottom: 16 }}>
-              <h3 style={{ fontSize: 15, fontWeight: 700, color: "#1A202C", margin: "0 0 12px" }}>Skor per Aspek</h3>
-              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                {secs.map(s => (
-                  <div key={s.code} style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                    <span style={{ fontSize: 13, fontWeight: 700, color: "#4A5568", width: 44 }}>{s.code}</span>
-                    <span style={{ fontSize: 13, color: "#2D3748", width: 60 }}>{s.total != null && s.total !== "" ? s.total : "—"}</span>
-                    {s.flag ? (
-                      <span style={{ fontSize: 12, fontWeight: 700, color: "#fff", background: flagColor(s.flag), borderRadius: 6, padding: "2px 10px" }}>
-                        {s.flag === "Typical" ? "Tipikal" : s.flag}
-                      </span>
-                    ) : <span style={{ fontSize: 12, color: "#CBD5E0" }}>—</span>}
-                    {s.catatan ? <span style={{ fontSize: 12, color: "#718096", fontStyle: "italic", marginLeft: 4 }}>“{s.catatan}”</span> : null}
-                  </div>
-                ))}
+              <h3 style={{ fontSize: 15, fontWeight: 700, color: "#1A202C", margin: "0 0 12px" }}>Rekap — Grafik VB-MAPP</h3>
+              <VbmappGridMini entry={e} />
+              <div style={{ display: "flex", gap: 10, marginTop: 14, flexWrap: "wrap" }}>
+                {LEVELS_META.map(lv => {
+                  const t = vbmappLevelTotal(e, lv.id);
+                  return t !== undefined ? (
+                    <div key={lv.id} style={{ background: BAND_TINT[lv.id], borderRadius: 8, padding: "6px 12px", fontSize: 12 }}>
+                      <b>{lv.label}</b>: {t}
+                    </div>
+                  ) : null;
+                })}
               </div>
-              {((e.total_score ?? (e.data && e.data.total_skor)) != null) && (
+              {((e.total_score ?? (e.data && e.data.grand_total)) != null) && (
                 <div style={{ marginTop: 14, paddingTop: 12, borderTop: "1px solid #E2E8F0", fontSize: 14, fontWeight: 700, color: "#2B6CB0" }}>
-                  Total Skor: {e.total_score ?? (e.data && e.data.total_skor)}{(e.max_score || (e.data && e.data.grand_max)) ? ` / ${e.max_score ?? e.data.grand_max}` : ""}
+                  Total Milestones: {e.total_score ?? e.data.grand_total}{(e.max_score ?? (e.data && e.data.grand_max)) ? ` / ${e.max_score ?? e.data.grand_max}` : ""}
                 </div>
               )}
             </div>
           )}
+
+          {e.type === "OT" && (() => {
+            const secs = otSectionsOf(e);
+            return secs.length > 0 && (
+              <div style={{ background: "#fff", borderRadius: 12, padding: 20, boxShadow: "0 1px 8px rgba(0,0,0,0.06)", marginBottom: 16 }}>
+                <h3 style={{ fontSize: 15, fontWeight: 700, color: "#1A202C", margin: "0 0 12px" }}>Rekap — Skor per Aspek</h3>
+                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                  {secs.map(s => (
+                    <div key={s.code} style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                      <span style={{ fontSize: 13, fontWeight: 700, color: "#4A5568", width: 130 }}>{s.code} — {s.name}</span>
+                      <span style={{ fontSize: 13, color: "#2D3748", width: 60 }}>{s.total}/{s.max}</span>
+                      {s.flag ? (
+                        <span style={{ fontSize: 12, fontWeight: 700, color: "#fff", background: flagColor(s.flag), borderRadius: 6, padding: "2px 10px" }}>
+                          {s.flag === "Typical" ? "Tipikal" : s.flag}
+                        </span>
+                      ) : <span style={{ fontSize: 12, color: "#CBD5E0" }}>—</span>}
+                      {s.catatan ? <span style={{ fontSize: 12, color: "#718096", fontStyle: "italic", marginLeft: 4 }}>“{s.catatan}”</span> : null}
+                    </div>
+                  ))}
+                </div>
+                {(e.total_score != null) && (
+                  <div style={{ marginTop: 14, paddingTop: 12, borderTop: "1px solid #E2E8F0", fontSize: 14, fontWeight: 700, color: "#2B6CB0" }}>
+                    Total Skor: {e.total_score}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+
+          {e.type === "ABLLS" && (() => {
+            const groups = abllsGroupsOf(e);
+            return groups.length > 0 && (
+              <div style={{ background: "#fff", borderRadius: 12, padding: 20, boxShadow: "0 1px 8px rgba(0,0,0,0.06)", marginBottom: 16 }}>
+                <h3 style={{ fontSize: 15, fontWeight: 700, color: "#1A202C", margin: "0 0 12px" }}>Rekap — Skor per Kelompok</h3>
+                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                  {groups.map(g => (
+                    <div key={g.code} style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                      <span style={{ fontSize: 13, fontWeight: 700, color: "#4A5568", flex: 1 }}>{g.code} — {g.name}</span>
+                      <span style={{ fontSize: 13, color: "#2D3748", width: 60, textAlign: "right" }}>{g.total}/{g.max}</span>
+                      {g.catatan ? <span style={{ fontSize: 12, color: "#718096", fontStyle: "italic", marginLeft: 4 }}>“{g.catatan}”</span> : null}
+                    </div>
+                  ))}
+                </div>
+                {(e.total_score != null) && (
+                  <div style={{ marginTop: 14, paddingTop: 12, borderTop: "1px solid #E2E8F0", fontSize: 14, fontWeight: 700, color: "#2B6CB0" }}>
+                    Total Skor: {e.total_score}{e.max_score ? ` / ${e.max_score}` : ""}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
 
           {/* Conclusion */}
           {e.kesimpulan && (
@@ -178,6 +333,16 @@ export default function Dashboard() {
             style={{ padding: "10px 12px", border: "1.5px solid #CBD5E0", borderRadius: 8, fontSize: 14, background: "#fff" }}>
             {types.map(t => <option key={t} value={t}>{t === "ALL" ? "Semua jenis" : t}</option>)}
           </select>
+          <select value={sortBy} onChange={e => setSortBy(e.target.value)}
+            style={{ padding: "10px 12px", border: "1.5px solid #CBD5E0", borderRadius: 8, fontSize: 14, background: "#fff" }}>
+            <option value="date">Urutkan: Tanggal</option>
+            <option value="name">Urutkan: Nama</option>
+          </select>
+          <button onClick={() => setSortDir(d => (d === "asc" ? "desc" : "asc"))}
+            title={sortDir === "asc" ? "Menaik (A→Z / lama→baru)" : "Menurun (Z→A / baru→lama)"}
+            style={{ padding: "10px 14px", background: "#fff", color: "#4A5568", border: "1.5px solid #CBD5E0", borderRadius: 8, fontSize: 14, fontWeight: 700, cursor: "pointer" }}>
+            {sortDir === "asc" ? "↑" : "↓"}
+          </button>
           <button onClick={load}
             style={{ padding: "10px 16px", background: "#2B6CB0", color: "#fff", border: "none", borderRadius: 8, fontSize: 14, fontWeight: 700, cursor: "pointer" }}>
             ↻ Muat ulang
@@ -188,7 +353,7 @@ export default function Dashboard() {
 
         {error && (
           <div style={{ background: "#FFF5F5", border: "1.5px solid #FC8181", borderRadius: 8, padding: "12px 16px", fontSize: 13, color: "#C53030", marginBottom: 16 }}>
-            ⚠️ Gagal memuat data: {error}. Pastikan Apps Script sudah di-deploy dengan doGet dan akses "Anyone".
+            ⚠️ Gagal memuat data: {error}. Pastikan URL & anon key Supabase sudah benar di src/supabaseClient.js.
           </div>
         )}
 
@@ -198,21 +363,33 @@ export default function Dashboard() {
 
         {filtered.length > 0 && (
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            {filtered.map((e, i) => (
-              <button key={i} onClick={() => setSelected(e)}
-                style={{ display: "flex", alignItems: "center", gap: 12, background: "#fff", border: "1.5px solid #E2E8F0", borderRadius: 10, padding: "12px 16px", cursor: "pointer", textAlign: "left" }}>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 14, fontWeight: 700, color: "#1A202C" }}>{nameOf(e)}</div>
-                  <div style={{ fontSize: 12, color: "#718096" }}>
-                    {e.type}{asesorOf(e) ? ` · ${asesorOf(e)}` : ""}{dateOf(e) ? ` · ${fmtDate(dateOf(e))}` : ""}
+            {sorted.map((e, i) => {
+              const url = fileUrlFor(e);
+              return (
+                <div key={i} role="button" tabIndex={0}
+                  onClick={() => setSelected(e)}
+                  onKeyDown={ev => { if (ev.key === "Enter") setSelected(e); }}
+                  style={{ display: "flex", alignItems: "center", gap: 12, background: "#fff", border: "1.5px solid #E2E8F0", borderRadius: 10, padding: "12px 16px", cursor: "pointer", textAlign: "left" }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 14, fontWeight: 700, color: "#1A202C" }}>{nameOf(e)}</div>
+                    <div style={{ fontSize: 12, color: "#718096" }}>
+                      {e.type}{asesorOf(e) ? ` · ${asesorOf(e)}` : ""}{dateOf(e) ? ` · ${fmtDate(dateOf(e))}` : ""}
+                    </div>
                   </div>
+                  {((e.total_score ?? (e.data && e.data.total_skor)) != null) && (
+                    <span style={{ fontSize: 13, fontWeight: 800, color: "#2B6CB0" }}>{e.total_score ?? (e.data && e.data.total_skor)}</span>
+                  )}
+                  {url && (
+                    <a href={url} target="_blank" rel="noreferrer" onClick={ev => ev.stopPropagation()}
+                      title="Download file"
+                      style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 32, height: 32, borderRadius: 8, background: "#EBF8FF", color: "#2B6CB0", textDecoration: "none", fontSize: 15, flex: "none" }}>
+                      ⬇️
+                    </a>
+                  )}
+                  <span style={{ color: "#CBD5E0", fontSize: 18 }}>›</span>
                 </div>
-                {((e.total_score ?? (e.data && e.data.total_skor)) != null) && (
-                  <span style={{ fontSize: 13, fontWeight: 800, color: "#2B6CB0" }}>{e.total_score ?? (e.data && e.data.total_skor)}</span>
-                )}
-                <span style={{ color: "#CBD5E0", fontSize: 18 }}>›</span>
-              </button>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>

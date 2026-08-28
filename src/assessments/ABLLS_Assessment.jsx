@@ -1,6 +1,7 @@
 import { useState, useCallback, useMemo } from "react";
-import { supabase, isConfigured } from "../supabaseClient.js";
+import { supabase, isConfigured, STORAGE_BUCKET } from "../supabaseClient.js";
 import { buildABLLSXlsxBlob } from "./reportBuilders.js";
+import { buildABLLSWordBlob } from "./wordReport_ABLLS.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ABLLS-R — SECTION H: INTRAVERBAL  |  Above & Beyond Child Development Center
@@ -279,6 +280,38 @@ const TASKS = [
     ex: "Amati komentar spontan anak dalam percakapan yang sedang berlangsung",
     c: { 2: "Spontan berkomentar ≥10 kali per hari", 1: "Spontan berkomentar ≥10 kali per minggu (tanpa prompt)" },
     auto: null, unit: "komentar" },
+
+  // ── EMOTION (tambahan) ──────────────────────────────────────────────────
+  { id: "E1", group: "G10", max: 3, nameId: "Melabel emosi", name: "Label the emotion",
+    ex: "“Miss sedang merasa apa?”",
+    c: { 3: "Mahir (>5 emosi)", 2: "Sebagian (5 emosi)", 1: "Sebagian (2 emosi)" },
+    auto: null, unit: "emosi" },
+
+  { id: "E2", group: "G10", max: 3, nameId: "Memperagakan emosi", name: "Act out emotion",
+    ex: "“Show me angry” / “Kalau marah gimana?”",
+    c: { 3: "Mahir (>5 emosi)", 2: "Sebagian (5 emosi)", 1: "Sebagian (2 emosi)" },
+    auto: null, unit: "emosi" },
+
+  { id: "E3", group: "G10", max: 3, nameId: "Mengidentifikasi situasi yang memunculkan emosi", name: "Identify emotion-eliciting situations",
+    ex: "“What makes you upset?” / “Apa yang buat kamu marah?”",
+    c: { 3: "Mahir (>5 emosi)", 2: "Sebagian (5 emosi)", 1: "Sebagian (2 emosi)" },
+    auto: null, unit: "emosi" },
+
+  { id: "E4", group: "G10", max: 4, nameId: "Coping mechanism", name: "Coping mechanism",
+    ex: "“Apa yang boleh/tidak boleh dilakukan kalau sedang marah?”",
+    c: {
+      4: "Mahir (boleh DAN tidak boleh untuk >5 emosi)",
+      3: "Sebagian (boleh DAN tidak boleh untuk 5 emosi)",
+      2: "Sebagian (boleh ATAU tidak boleh untuk 5 emosi)",
+      1: "Sebagian (boleh ATAU tidak boleh untuk 2 emosi)",
+    },
+    auto: null, unit: "emosi" },
+
+  // ── PERSPECTIVE TAKING (tambahan) ───────────────────────────────────────
+  { id: "PT1", group: "G11", max: 2, nameId: "Sally-Anne Test", name: "Sally-Anne false-belief test",
+    ex: "Prosedur Sally-Anne: “Di mana Sally akan mencari kelerengnya?”",
+    c: { 2: "Pass dengan reasoning", 1: "Pass tanpa reasoning" },
+    auto: null, unit: "percobaan" },
 ];
 
 // ── KELOMPOK ─────────────────────────────────────────────────────────────────
@@ -292,7 +325,19 @@ const GROUPS = [
   { code: "G7", name: "Sekuens & Deskripsi",       short: "Sekuens",    from: 34, to: 36 },
   { code: "G8", name: "Ya/Tidak & Multi-komponen", short: "Multi",      from: 37, to: 40 },
   { code: "G9", name: "Peristiwa & Percakapan",    short: "Percakapan", from: 41, to: 49 },
-].map(g => ({ ...g, tasks: TASKS.filter(t => { const n = Number(t.id.slice(1)); return n >= g.from && n <= g.to; }) }));
+  { code: "G10", name: "Emosi",                    short: "Emosi" },
+  { code: "G11", name: "Perspective Taking",       short: "Perspektif" },
+].map(g => ({
+  ...g,
+  // A task belongs to this group if it declares `group: g.code`, OR (for the
+  // original H-tasks with no explicit group) its H-number falls in [from, to].
+  tasks: TASKS.filter(t => {
+    if (t.group) return t.group === g.code;
+    if (g.from == null) return false;
+    const n = Number(t.id.slice(1));
+    return !isNaN(n) && n >= g.from && n <= g.to;
+  }),
+}));
 
 const TOTAL_MAX = TASKS.reduce((s, t) => s + t.max, 0); // 184
 
@@ -359,6 +404,7 @@ export default function ABLLSAssessment() {
   const [saveMsg, setSaveMsg] = useState("");
   const [saveErr, setSaveErr] = useState("");
   const [xlsxBusy, setXlsxBusy] = useState(false);
+  const [wordBusy, setWordBusy] = useState(false);
 
   // tulis jawaban → skor ikut terisi bila butir punya kriteria terhitung
   const setAnswer = useCallback((task, text) => {
@@ -488,6 +534,22 @@ export default function ABLLSAssessment() {
       data.total_skor = total.got;
       data.max_skor = total.max;
 
+      // Build the same Excel report the download button produces, and store it
+      // so every entry has a downloadable file, same as OT and VB-MAPP.
+      let filePath = "";
+      try {
+        const blob = await buildABLLSXlsxBlob(buildXlsxCfg());
+        const safe = (client.nama || "klien").replace(/[^\w\-]+/g, "_");
+        filePath = `ABLLS/${safe}_${Date.now()}.xlsx`;
+        const up = await supabase.storage.from(STORAGE_BUCKET).upload(filePath, blob, {
+          contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          upsert: false,
+        });
+        if (up.error) filePath = "";
+      } catch (fileErr) {
+        filePath = "";
+      }
+
       const { error } = await supabase.from("assessments").insert({
         type: "ABLLS",
         client_name: client.nama || null,
@@ -502,6 +564,7 @@ export default function ABLLSAssessment() {
         max_score: total.max ?? null,
         kesimpulan: kesimpulan || null,
         data,
+        file_path: filePath || null,
       });
       if (error) throw error;
       setSaveMsg("Tersimpan ke database. Entri muncul di Dashboard.");
@@ -512,25 +575,29 @@ export default function ABLLSAssessment() {
     }
   }
 
+  function buildXlsxCfg() {
+    return {
+      client, testRound,
+      groups: GROUPS.map(g => {
+        const gs = groupScore(scores, g);
+        return {
+          code: g.code, name: g.name, total: gs.got, max: gs.max,
+          tasks: g.tasks.map(t => ({
+            id: t.id, nameId: t.nameId, max: t.max,
+            score: scores[t.id], answer: answers[t.id] || "",
+            manual: !!manual[t.id], na: isNA(scores[t.id]),
+          })),
+        };
+      }),
+      totalGot: total.got, totalMax: total.max,
+      kesimpulan, rekomendasi,
+    };
+  }
+
   async function downloadExcel() {
     setXlsxBusy(true);
     try {
-      const cfg = {
-        client, testRound,
-        groups: GROUPS.map(g => {
-          const gs = groupScore(scores, g);
-          return {
-            code: g.code, name: g.name, total: gs.got, max: gs.max,
-            tasks: g.tasks.map(t => ({
-              id: t.id, nameId: t.nameId, max: t.max,
-              score: scores[t.id], answer: answers[t.id] || "",
-              manual: !!manual[t.id], na: isNA(scores[t.id]),
-            })),
-          };
-        }),
-        totalGot: total.got, totalMax: total.max,
-        kesimpulan, rekomendasi,
-      };
+      const cfg = buildXlsxCfg();
       const blob = await buildABLLSXlsxBlob(cfg);
       const date = new Date().toLocaleDateString("id-ID", { day: "2-digit", month: "long", year: "numeric" });
       const url = URL.createObjectURL(blob);
@@ -543,6 +610,40 @@ export default function ABLLSAssessment() {
       setSaveErr("Gagal membuat file Excel: " + (e && e.message ? e.message : "unknown"));
     } finally {
       setXlsxBusy(false);
+    }
+  }
+
+  async function downloadWordReport() {
+    setWordBusy(true);
+    try {
+      const cfg = {
+        client, testRound,
+        groups: GROUPS.map(g => {
+          const gs = groupScore(scores, g);
+          return {
+            code: g.code, name: g.name, total: gs.got, max: gs.max,
+            tasks: g.tasks.map(t => ({
+              id: t.id, nameId: t.nameId, max: t.max,
+              score: scores[t.id], answer: answers[t.id] || "",
+              na: isNA(scores[t.id]),
+            })),
+          };
+        }),
+        totalGot: total.got, totalMax: total.max,
+        kesimpulan, rekomendasi,
+      };
+      const blob = await buildABLLSWordBlob(cfg);
+      const date = new Date().toLocaleDateString("id-ID", { day: "2-digit", month: "long", year: "numeric" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `ABLLSR_Laporan_${(client.nama || "klien").replace(/\s+/g, "_")}_Tes${testRound}_${client.tanggalAsesmen || date}.docx`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setSaveErr("Gagal membuat laporan Word: " + (e && e.message ? e.message : "unknown"));
+    } finally {
+      setWordBusy(false);
     }
   }
 
@@ -661,7 +762,7 @@ export default function ABLLSAssessment() {
             <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
               {activeGroup.tasks.map(t => {
                 const val = scores[t.id];
-                const opts = t.max === 4 ? [0, 1, 2, 3, 4] : [0, 1, 2];
+                const opts = Array.from({ length: t.max + 1 }, (_, i) => i);
                 const count = countLines(answers[t.id]);
                 const sug = suggestScore(t, count);
                 return (
@@ -844,6 +945,9 @@ export default function ABLLSAssessment() {
               <button onClick={downloadExcel} disabled={xlsxBusy}
                 style={{ flex: 1, background: xlsxBusy ? "#A0AEC0" : "#2B6CB0", color: "#fff", border: "none", borderRadius: 10, padding: "14px 20px", fontSize: 14, fontWeight: 700, cursor: xlsxBusy ? "not-allowed" : "pointer" }}>
                 {xlsxBusy ? "Membuat..." : "📊 Excel"}</button>
+              <button onClick={downloadWordReport} disabled={wordBusy}
+                style={{ flex: 1, background: wordBusy ? "#A0AEC0" : "#1E75BC", color: "#fff", border: "none", borderRadius: 10, padding: "14px 20px", fontSize: 14, fontWeight: 700, cursor: wordBusy ? "not-allowed" : "pointer" }}>
+                {wordBusy ? "Membuat..." : "📝 Laporan (Word)"}</button>
               <button onClick={saveToSupabase} disabled={saving}
                 style={{ flex: 2, background: saving ? "#A0AEC0" : "#276749", color: "#fff", border: "none", borderRadius: 10, padding: "14px 20px", fontSize: 15, fontWeight: 700, cursor: saving ? "not-allowed" : "pointer", boxShadow: "0 2px 12px rgba(39,103,73,0.2)" }}>
                 {saving ? "Menyimpan..." : "💾 Simpan ke Database"}</button>
