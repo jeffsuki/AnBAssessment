@@ -703,6 +703,78 @@ export const LEVELS_META = LEVELS.map(lv => ({
   domains: lv.domains.map(d => ({ code: d.code, disabled: !!d.disabled })),
 }));
 
+// ── REBUILD A REPORT CFG FROM A SAVED ROW ────────────────────────────────────
+// The Dashboard needs to regenerate the Word report for entries whose .docx was
+// never uploaded (e.g. Storage bucket/policy missing at save time). Everything
+// needed is already in the row's JSONB `data`, so we rebuild the same shape
+// buildXlsxCfg() produces inside the component.
+export function vbmappCfgFromEntry(entry) {
+  const flat = (entry && entry.data) || {};
+  const round = TEST_ROUNDS.find(r => r.value === entry.test_round) || TEST_ROUNDS[0];
+  const raw = (lid, code, n) => flat[`${lid}_${code}_${n}`];
+  const isInvalid = v => v === "tidak_dapat_diuji";
+
+  const client = {
+    nama: entry.client_name || flat.nama || "",
+    noClient: entry.client_no || flat.noClient || "",
+    usia: entry.usia || flat.usia || "",
+    tanggalLahir: flat.tanggalLahir || "",
+    jenisKelamin: entry.jenis_kelamin || flat.jenisKelamin || "",
+    diagnosis: entry.diagnosis || flat.diagnosis || "",
+    asesor: entry.asesor || flat.asesor || "",
+    tanggalAsesmen: entry.assessment_date || flat.tanggalAsesmen || "",
+  };
+
+  const cell = (code, n) => {
+    const lid = levelOf(n);
+    const lv = LEVELS.find(l => l.id === lid);
+    const dom = lv && lv.domains.find(d => d.code === code);
+    const item = dom && dom.items.find(it => it.n === n);
+    if (!item) return { exists: false };
+    if (dom.disabled) return { exists: true, disabled: true };
+    const v = raw(lid, code, n);
+    if (isInvalid(v)) return { exists: true, disabled: true };
+    if (v === undefined || v === "") return { exists: true, answered: false, score: 0 };
+    return { exists: true, answered: true, score: Number(v) || 0 };
+  };
+
+  const levels = LEVELS.map(lv => {
+    const domains = lv.domains.map(d => ({
+      code: d.code, name: d.name, disabled: !!d.disabled,
+      items: d.items.map(it => {
+        const v = raw(lv.id, d.code, it.n);
+        const invalid = isInvalid(v);
+        return {
+          n: it.n, text: it.text, invalid,
+          score: invalid || v === undefined || v === "" ? 0 : Number(v) || 0,
+          answered: !invalid && v !== undefined && v !== "",
+          data: flat[`${lv.id}_${d.code}_${it.n}_data`] ?? "",
+        };
+      }),
+    }));
+    const max = domains.reduce(
+      (s, d) => (d.disabled ? s : s + d.items.filter(it => !it.invalid).length), 0);
+    const storedTotal = flat[`${lv.id}_total`];
+    const total = typeof storedTotal === "number"
+      ? storedTotal
+      : domains.reduce((s, d) => (d.disabled ? s : s + d.items.reduce((a, it) => a + (it.invalid ? 0 : it.score), 0)), 0);
+    return { id: lv.id, label: lv.label, range: lv.range, total, max, domains };
+  });
+
+  return {
+    client,
+    testRound: entry.test_round || round.value,
+    roundColor: round.color, roundHalf: round.half,
+    GRID_COLS, GRID_ROWS, levelOf, BAND_TINT, cell,
+    eesaGroups: EESA_GROUPS.map(g => ({ name: g.name, score: flat[`EESA_${g.id}_total`] ?? 0 })),
+    eesaTotal: flat.eesa_total ?? 0,
+    levels,
+    grandTotal: entry.total_score ?? flat.grand_total ?? levels.reduce((s, l) => s + l.total, 0),
+    grandMax: entry.max_score ?? flat.grand_max ?? levels.reduce((s, l) => s + l.max, 0),
+    kesimpulan: entry.kesimpulan || flat.kesimpulan || "",
+  };
+}
+
 function gridCell(code, n, scores, eesa, invalidItems) {
   const lid = levelOf(n);
   const lv = LEVELS.find(l => l.id === lid);
@@ -790,6 +862,9 @@ export default function VBMappAssessment() {
   const [submitting, setSubmitting] = useState(false);
   const [submitted, setSubmitted] = useState(false);
   const [submitError, setSubmitError] = useState("");
+  // Non-fatal Storage upload failures — the row still saves, but we tell the
+  // user so a misconfigured bucket/policy is visible instead of silent.
+  const [storageWarn, setStorageWarn] = useState("");
   const [xlsxBusy, setXlsxBusy] = useState(false);
   const [wordBusy, setWordBusy] = useState(false);
   const [xlsxError, setXlsxError] = useState("");
@@ -964,7 +1039,8 @@ export default function VBMappAssessment() {
 
   // ── SUBMIT ──────────────────────────────────────────────────────────────────
   async function handleSubmit() {
-    setSubmitting(true); setSubmitError("");
+    setSubmitting(true); setSubmitError(""); setStorageWarn("");
+    const warns = [];
     const row = {
       timestamp: new Date().toISOString(),
       testRound,
@@ -1008,9 +1084,10 @@ export default function VBMappAssessment() {
           contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
           upsert: false,
         });
-        if (up.error) filePath = ""; // non-fatal: keep the row even if the file fails
+        if (up.error) { filePath = ""; warns.push("Excel: " + up.error.message); }
       } catch (fileErr) {
         filePath = "";
+        warns.push("Excel: " + (fileErr && fileErr.message ? fileErr.message : "unknown"));
       }
 
       // Build the branded Word report ("Laporan" with the grafik) and upload
@@ -1024,9 +1101,10 @@ export default function VBMappAssessment() {
           contentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
           upsert: false,
         });
-        if (up2.error) reportPath = "";
+        if (up2.error) { reportPath = ""; warns.push("Laporan Word: " + up2.error.message); }
       } catch (wordErr) {
         reportPath = "";
+        warns.push("Laporan Word: " + (wordErr && wordErr.message ? wordErr.message : "unknown"));
       }
 
       const { error } = await supabase.from("assessments").insert({
@@ -1047,6 +1125,7 @@ export default function VBMappAssessment() {
         report_docx_path: reportPath || null,
       });
       if (error) throw error;
+      if (warns.length) setStorageWarn(warns.join(" · "));
       generateReport();
       setSubmitted(true);
     } catch (e) {
@@ -1073,6 +1152,13 @@ export default function VBMappAssessment() {
           <h2 style={{ fontSize: 22, fontWeight: 700, color: "#1A202C", marginBottom: 8 }}>Asesmen Tersimpan</h2>
           <p style={{ color: "#718096", marginBottom: 8 }}>Data {client.nama} (Tes ke-{testRound}) berhasil disimpan ke database.</p>
           <p style={{ color: "#A0AEC0", fontSize: 13, marginBottom: 24 }}>Laporan sudah terdownload — upload ke folder Drive klien.</p>
+          {storageWarn && (
+            <div style={{ background: "#FFFFF0", border: "1.5px solid #F6E05E", borderRadius: 8, padding: "10px 14px", fontSize: 12, color: "#744210", textAlign: "left", marginBottom: 20, lineHeight: 1.6 }}>
+              ⚠️ Data tersimpan, tapi file gagal diunggah ke Storage: {storageWarn}.<br />
+              Cek bucket <b>assessment-files</b> (harus ada, public, dan punya policy INSERT untuk role anon).
+              Laporan tetap bisa dibuat ulang dari Dashboard.
+            </div>
+          )}
           <button onClick={resetForm} style={{ background: "#2B6CB0", color: "#fff", border: "none", borderRadius: 8, padding: "12px 32px", fontSize: 15, fontWeight: 600, cursor: "pointer" }}>Asesmen Baru</button>
         </div>
       </div>

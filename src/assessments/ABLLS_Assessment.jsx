@@ -387,6 +387,51 @@ function ScoreButton({ value, selected, onClick, label, sub }) {
   );
 }
 
+// ── REBUILD A REPORT CFG FROM A SAVED ROW ────────────────────────────────────
+// Lets the Dashboard regenerate the Word report for entries whose .docx was
+// never uploaded. Reads per-task scores/answers back out of the row's JSONB
+// `data` (keys: H1_skor / H1_jawaban … plus per-group totals).
+export function abllsCfgFromEntry(entry) {
+  const flat = (entry && entry.data) || {};
+  const client = {
+    nama: entry.client_name || flat.nama || "",
+    noClient: entry.client_no || flat.noClient || "",
+    usia: entry.usia || flat.usia || "",
+    tanggalLahir: flat.tanggalLahir || "",
+    jenisKelamin: entry.jenis_kelamin || flat.jenisKelamin || "",
+    diagnosis: entry.diagnosis || flat.diagnosis || "",
+    asesor: entry.asesor || flat.asesor || "",
+    tanggalAsesmen: entry.assessment_date || flat.tanggalAsesmen || "",
+  };
+
+  const groups = GROUPS.map(g => {
+    const tasks = g.tasks.map(t => {
+      const v = flat[`${t.id}_skor`];
+      const na = isNA(v);
+      return {
+        id: t.id, nameId: t.nameId, max: t.max,
+        score: na || v === "" || v == null ? null : Number(v),
+        answer: flat[`${t.id}_jawaban`] || "",
+        manual: !!flat[`${t.id}_manual`],
+        na,
+      };
+    });
+    const total = flat[`${g.code}_total`] ?? tasks.reduce((s, t) => s + (t.score || 0), 0);
+    const max = flat[`${g.code}_max`] ?? tasks.reduce((s, t) => s + (t.na ? 0 : t.max), 0);
+    return { code: g.code, name: g.name, total, max, tasks, catatan: flat[`${g.code}_catatan`] || "" };
+  });
+
+  return {
+    client,
+    testRound: entry.test_round || flat.testRound || 1,
+    groups,
+    totalGot: entry.total_score ?? flat.total_skor ?? groups.reduce((s, g) => s + g.total, 0),
+    totalMax: entry.max_score ?? flat.max_skor ?? groups.reduce((s, g) => s + g.max, 0),
+    kesimpulan: entry.kesimpulan || flat.kesimpulan || "",
+    rekomendasi: flat.rekomendasi || "",
+  };
+}
+
 export default function ABLLSAssessment() {
   const [tab, setTab] = useState("client");
   const [client, setClient] = useState({
@@ -403,6 +448,9 @@ export default function ABLLSAssessment() {
   const [saving, setSaving] = useState(false);
   const [saveMsg, setSaveMsg] = useState("");
   const [saveErr, setSaveErr] = useState("");
+  // Non-fatal Storage upload failures — the row still saves, but we surface it
+  // so a misconfigured bucket/policy is visible instead of silent.
+  const [storageWarn, setStorageWarn] = useState("");
   const [xlsxBusy, setXlsxBusy] = useState(false);
   const [wordBusy, setWordBusy] = useState(false);
 
@@ -507,7 +555,8 @@ export default function ABLLSAssessment() {
   }
 
   async function saveToSupabase() {
-    setSaving(true); setSaveMsg(""); setSaveErr("");
+    setSaving(true); setSaveMsg(""); setSaveErr(""); setStorageWarn("");
+    const warns = [];
     try {
       if (!isConfigured) throw new Error("Supabase belum dikonfigurasi (isi src/supabaseClient.js).");
 
@@ -545,9 +594,10 @@ export default function ABLLSAssessment() {
           contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
           upsert: false,
         });
-        if (up.error) filePath = "";
+        if (up.error) { filePath = ""; warns.push("Excel: " + up.error.message); }
       } catch (fileErr) {
         filePath = "";
+        warns.push("Excel: " + (fileErr && fileErr.message ? fileErr.message : "unknown"));
       }
 
       // Build the branded Word report ("Laporan") and upload it too.
@@ -560,9 +610,10 @@ export default function ABLLSAssessment() {
           contentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
           upsert: false,
         });
-        if (up2.error) reportPath = "";
+        if (up2.error) { reportPath = ""; warns.push("Laporan Word: " + up2.error.message); }
       } catch (wordErr) {
         reportPath = "";
+        warns.push("Laporan Word: " + (wordErr && wordErr.message ? wordErr.message : "unknown"));
       }
 
       const { error } = await supabase.from("assessments").insert({
@@ -583,6 +634,7 @@ export default function ABLLSAssessment() {
         report_docx_path: reportPath || null,
       });
       if (error) throw error;
+      if (warns.length) setStorageWarn(warns.join(" · "));
       setSaveMsg("Tersimpan ke database. Entri muncul di Dashboard.");
     } catch (e) {
       setSaveErr("Gagal menyimpan: " + (e && e.message ? e.message : "unknown"));
@@ -954,6 +1006,11 @@ export default function ABLLSAssessment() {
             )}
             {saveMsg && (
               <div style={{ background: "#F0FFF4", border: "1.5px solid #9AE6B4", borderRadius: 8, padding: "12px 16px", fontSize: 13, color: "#276749" }}>✅ {saveMsg}</div>
+            )}
+            {storageWarn && (
+              <div style={{ background: "#FFFFF0", border: "1.5px solid #F6E05E", borderRadius: 8, padding: "12px 16px", fontSize: 12, color: "#744210", lineHeight: 1.6 }}>
+                ⚠️ Data tersimpan, tapi file gagal diunggah ke Storage: {storageWarn}. Cek bucket <b>assessment-files</b> (harus ada, public, dan punya policy INSERT untuk role anon). Laporan tetap bisa dibuat ulang dari Dashboard.
+              </div>
             )}
             <div style={{ display: "flex", gap: 12 }}>
               <button onClick={generateReport}

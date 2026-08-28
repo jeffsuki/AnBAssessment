@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { supabase, STORAGE_BUCKET, isConfigured } from "./supabaseClient.js";
 import { GRID_COLS, GRID_ROWS, levelOf, BAND_TINT, TEST_ROUNDS, LEVELS_META } from "./assessments/VBMapp_Assessment.jsx";
+import { downloadWordFromEntry } from "./assessments/reportFromEntry.js";
 
 // OT section maxes are static constants in OT_Assessment.jsx (SECTIONS[].max);
 // duplicated here (small, 10 numbers) since OT doesn't store max per entry.
@@ -138,6 +139,23 @@ export default function Dashboard() {
   const [typeFilter, setTypeFilter] = useState("ALL");
   const [sortBy, setSortBy] = useState("date"); // "date" | "name"
   const [sortDir, setSortDir] = useState("desc"); // "asc" | "desc"
+  const [regenId, setRegenId] = useState(null);   // id of the entry being rebuilt
+  const [regenErr, setRegenErr] = useState("");
+
+  // Rebuild the Word report from the row's stored JSONB and download it.
+  // Used when report_docx_path is null (upload failed or predates the feature),
+  // so the download button is never absent.
+  const regenerate = useCallback(async entry => {
+    setRegenErr("");
+    setRegenId(entry.id ?? entry.created_at);
+    try {
+      await downloadWordFromEntry(entry);
+    } catch (err) {
+      setRegenErr(`Gagal membuat laporan untuk ${entry.client_name || "entri ini"}: ${err && err.message ? err.message : "unknown"}`);
+    } finally {
+      setRegenId(null);
+    }
+  }, []);
 
   const load = useCallback(async () => {
     setEntries(null);
@@ -232,18 +250,29 @@ export default function Dashboard() {
                   ⬇️ Download data (Excel)
                 </a>
               )}
-              {reportUrlFor(e) && (
+              {reportUrlFor(e) ? (
                 <a href={reportUrlFor(e)} target="_blank" rel="noreferrer"
                   style={{ display: "inline-block", background: "#EBF8FF", color: "#1E75BC", border: "1.5px solid #90CDF4", borderRadius: 8, padding: "8px 14px", fontSize: 13, fontWeight: 700, textDecoration: "none" }}>
                   📝 Download Laporan
                 </a>
-              )}
-              {!fileUrlFor(e) && !reportUrlFor(e) && (
-                <div style={{ fontSize: 12, color: "#A0AEC0", fontStyle: "italic" }}>
-                  Tidak ada file tersimpan untuk entri ini.
-                </div>
+              ) : (
+                <button onClick={() => regenerate(e)} disabled={regenId != null}
+                  title="Laporan dibuat ulang dari data tersimpan"
+                  style={{ background: "#EBF8FF", color: "#1E75BC", border: "1.5px solid #90CDF4", borderRadius: 8, padding: "8px 14px", fontSize: 13, fontWeight: 700, cursor: regenId != null ? "wait" : "pointer" }}>
+                  {regenId != null ? "Membuat laporan…" : "📝 Buat & Download Laporan"}
+                </button>
               )}
             </div>
+            {!fileUrlFor(e) && (
+              <div style={{ fontSize: 12, color: "#A0AEC0", fontStyle: "italic", marginTop: 8 }}>
+                File Excel tidak tersimpan di Storage untuk entri ini — laporan Word di atas dibuat ulang dari data.
+              </div>
+            )}
+            {regenErr && (
+              <div style={{ background: "#FFF5F5", border: "1.5px solid #FC8181", borderRadius: 8, padding: "10px 14px", fontSize: 13, color: "#C53030", marginTop: 10 }}>
+                ⚠️ {regenErr}
+              </div>
+            )}
           </div>
 
           {/* Rekap — rendered per assessment type */}
@@ -366,6 +395,20 @@ export default function Dashboard() {
 
         {entries === null && <div style={{ textAlign: "center", color: "#718096", padding: 40 }}>Memuat entri…</div>}
 
+        {regenErr && (
+          <div style={{ background: "#FFF5F5", border: "1.5px solid #FC8181", borderRadius: 8, padding: "12px 16px", fontSize: 13, color: "#C53030", marginBottom: 16 }}>
+            ⚠️ {regenErr}
+          </div>
+        )}
+
+        {entries && entries.length > 0 && entries.every(e => !e.file_path && !e.report_docx_path) && (
+          <div style={{ background: "#FFFFF0", border: "1.5px solid #F6E05E", borderRadius: 8, padding: "12px 16px", fontSize: 13, color: "#744210", marginBottom: 16, lineHeight: 1.6 }}>
+            Tidak ada satu pun entri yang punya file di Storage. Biasanya ini berarti bucket
+            <b> {STORAGE_BUCKET}</b> belum dibuat, belum public, atau belum punya policy INSERT
+            untuk role <b>anon</b>. Tombol 📝 di bawah tetap berfungsi — laporan dibuat ulang dari data.
+          </div>
+        )}
+
         {error && (
           <div style={{ background: "#FFF5F5", border: "1.5px solid #FC8181", borderRadius: 8, padding: "12px 16px", fontSize: 13, color: "#C53030", marginBottom: 16 }}>
             ⚠️ Gagal memuat data: {error}. Pastikan URL & anon key Supabase sudah benar di src/supabaseClient.js.
@@ -402,12 +445,19 @@ export default function Dashboard() {
                       ⬇️
                     </a>
                   )}
-                  {reportUrl && (
+                  {reportUrl ? (
                     <a href={reportUrl} target="_blank" rel="noreferrer" onClick={ev => ev.stopPropagation()}
                       title="Download Laporan (Word)"
                       style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 32, height: 32, borderRadius: 8, background: "#EBF8FF", color: "#1E75BC", textDecoration: "none", fontSize: 15, flex: "none" }}>
                       📝
                     </a>
+                  ) : (
+                    <button onClick={ev => { ev.stopPropagation(); regenerate(e); }}
+                      disabled={regenId != null}
+                      title="Buat & download Laporan (Word) dari data tersimpan"
+                      style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 32, height: 32, borderRadius: 8, background: "#EBF8FF", color: "#1E75BC", border: "1.5px dashed #90CDF4", fontSize: 15, flex: "none", cursor: regenId != null ? "wait" : "pointer", padding: 0 }}>
+                      {regenId === (e.id ?? e.created_at) ? "…" : "📝"}
+                    </button>
                   )}
                   <span style={{ color: "#CBD5E0", fontSize: 18 }}>›</span>
                 </div>

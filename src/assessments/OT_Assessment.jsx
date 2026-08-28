@@ -262,6 +262,52 @@ function SectionTab({ section, active, complete, total, onClick }) {
 
 // ── MAIN APP ─────────────────────────────────────────────────────────────────
 
+// ── REBUILD A REPORT CFG FROM A SAVED ROW ────────────────────────────────────
+// Lets the Dashboard regenerate the Word report for entries whose .docx was
+// never uploaded. Mirrors buildWordCfg() inside the component, but reads the
+// per-item scores back out of the row's JSONB `data` (keys: S1_1 … S10_n).
+export function otCfgFromEntry(entry) {
+  const flat = (entry && entry.data) || {};
+  const client = {
+    nama: entry.client_name || flat.nama || "",
+    noClient: entry.client_no || flat.noClient || "",
+    usia: entry.usia || flat.usia || "",
+    tanggalLahir: flat.tanggalLahir || "",
+    jenisKelamin: entry.jenis_kelamin || flat.jenisKelamin || "",
+    diagnosis: entry.diagnosis || flat.diagnosis || "",
+    asesor: entry.asesor || flat.asesor || "",
+    tanggalAsesmen: entry.assessment_date || flat.tanggalAsesmen || "",
+  };
+
+  const sections = SECTIONS.map(section => {
+    const items = section.items.map((text, i) => {
+      const v = flat[`${section.code}_${i + 1}`];
+      const score = v === "" || v == null ? 0 : Number(v) || 0;
+      return { n: i + 1, text, score, data: SCALE.find(s => s.value === score)?.label || "" };
+    });
+    const storedTotal = flat[`${section.code}_total`];
+    const total = typeof storedTotal === "number"
+      ? storedTotal
+      : items.reduce((s, it) => s + it.score, 0);
+    const flag = flat[`${section.code}_flag`] || (sectionFlag(total, section)?.label ?? null);
+    return {
+      code: section.code, name: section.label, total, max: section.max,
+      flagLabel: flag || null,
+      catatan: flat[`${section.code}_catatan`] || "",
+      items,
+    };
+  });
+
+  return {
+    client,
+    testRound: entry.test_round || 1,
+    sections,
+    totalGot: entry.total_score ?? flat.total_skor ?? sections.reduce((s, sec) => s + sec.total, 0),
+    totalMax: SECTIONS.reduce((s, sec) => s + sec.max, 0),
+    kesimpulan: entry.kesimpulan || flat.kesimpulan || "",
+  };
+}
+
 export default function ANBAssessment() {
   const [tab, setTab] = useState("client");
   const [client, setClient] = useState({
@@ -274,6 +320,9 @@ export default function ANBAssessment() {
   const [submitting, setSubmitting] = useState(false);
   const [submitted, setSubmitted] = useState(false);
   const [submitError, setSubmitError] = useState("");
+  // Non-fatal Storage upload failures — the row still saves, but we tell the
+  // user so a misconfigured bucket/policy is visible instead of silent.
+  const [storageWarn, setStorageWarn] = useState("");
   const [xlsxBusy, setXlsxBusy] = useState(false);
   const [wordBusy, setWordBusy] = useState(false);
   const [xlsxError, setXlsxError] = useState("");
@@ -538,6 +587,8 @@ export default function ANBAssessment() {
   async function handleSubmit() {
     setSubmitting(true);
     setSubmitError("");
+    setStorageWarn("");
+    const warns = [];
 
     const row = {
       timestamp: new Date().toISOString(),
@@ -579,9 +630,10 @@ export default function ANBAssessment() {
           contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
           upsert: false,
         });
-        if (up.error) { filePath = ""; } // non-fatal: keep the row even if the file fails
+        if (up.error) { filePath = ""; warns.push("Excel: " + up.error.message); }
       } catch (fileErr) {
         filePath = "";
+        warns.push("Excel: " + (fileErr && fileErr.message ? fileErr.message : "unknown"));
       }
 
       // 2) Build the branded Word report ("Laporan") and upload it too, so the
@@ -595,9 +647,10 @@ export default function ANBAssessment() {
           contentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
           upsert: false,
         });
-        if (up2.error) reportPath = "";
+        if (up2.error) { reportPath = ""; warns.push("Laporan Word: " + up2.error.message); }
       } catch (wordErr) {
         reportPath = "";
+        warns.push("Laporan Word: " + (wordErr && wordErr.message ? wordErr.message : "unknown"));
       }
 
       // 3) Insert the assessment row (promoted columns + full JSONB payload).
@@ -617,6 +670,7 @@ export default function ANBAssessment() {
         report_docx_path: reportPath || null,
       });
       if (error) throw error;
+      if (warns.length) setStorageWarn(warns.join(" · "));
 
       generatePDF();
       setSubmitted(true);
@@ -647,6 +701,13 @@ export default function ANBAssessment() {
           <h2 style={{ fontSize: 22, fontWeight: 700, color: "#1A202C", marginBottom: 8 }}>Asesmen Tersimpan</h2>
           <p style={{ color: "#718096", marginBottom: 8 }}>Data {client.nama} berhasil disimpan ke database.</p>
           <p style={{ color: "#A0AEC0", fontSize: 13, marginBottom: 24 }}>Laporan sudah terdownload — upload ke folder Drive klien.</p>
+          {storageWarn && (
+            <div style={{ background: "#FFFFF0", border: "1.5px solid #F6E05E", borderRadius: 8, padding: "10px 14px", fontSize: 12, color: "#744210", textAlign: "left", marginBottom: 20, lineHeight: 1.6 }}>
+              ⚠️ Data tersimpan, tapi file gagal diunggah ke Storage: {storageWarn}.<br />
+              Cek bucket <b>assessment-files</b> (harus ada, public, dan punya policy INSERT untuk role anon).
+              Laporan tetap bisa dibuat ulang dari Dashboard.
+            </div>
+          )}
           <button onClick={resetForm} style={{ background: "#2B6CB0", color: "#fff", border: "none", borderRadius: 8, padding: "12px 32px", fontSize: 15, fontWeight: 600, cursor: "pointer" }}>
             Asesmen Baru
           </button>
