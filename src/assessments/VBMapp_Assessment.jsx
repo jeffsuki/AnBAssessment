@@ -1,7 +1,6 @@
 import { useState, useCallback, useMemo } from "react";
 import { supabase, isConfigured, STORAGE_BUCKET } from "../supabaseClient.js";
 import { buildVbmappWordBlob } from "./wordReport_VBMapp.js";
-import { buildVbmappXlsxBlob } from "./reportBuilders.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // VB-MAPP MILESTONES ASSESSMENT — Above & Beyond
@@ -865,7 +864,6 @@ export default function VBMappAssessment() {
   // Non-fatal Storage upload failures — the row still saves, but we tell the
   // user so a misconfigured bucket/policy is visible instead of silent.
   const [storageWarn, setStorageWarn] = useState("");
-  const [xlsxBusy, setXlsxBusy] = useState(false);
   const [wordBusy, setWordBusy] = useState(false);
   const [xlsxError, setXlsxError] = useState("");
 
@@ -997,26 +995,6 @@ export default function VBMappAssessment() {
     };
   }
 
-  async function downloadExcel() {
-    setXlsxBusy(true);
-    setXlsxError("");
-    try {
-      const cfg = buildXlsxCfg();
-      const blob = await buildVbmappXlsxBlob(cfg);
-      const dateStr = new Date().toLocaleDateString("id-ID", { day: "2-digit", month: "long", year: "numeric" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `VBMapp_${(client.nama || "klien").replace(/\s+/g, "_")}_Tes${testRound}_${client.tanggalAsesmen || dateStr}.xlsx`;
-      a.click();
-      URL.revokeObjectURL(url);
-    } catch (err) {
-      setXlsxError("Gagal membuat file Excel: " + (err && err.message ? err.message : "unknown"));
-    } finally {
-      setXlsxBusy(false);
-    }
-  }
-
   async function downloadWordReport() {
     setWordBusy(true);
     setXlsxError("");
@@ -1073,23 +1051,6 @@ export default function VBMappAssessment() {
     try {
       if (!isConfigured) throw new Error("Supabase belum dikonfigurasi (isi src/supabaseClient.js).");
 
-      // Build the same Excel report the download button produces, and store it
-      // so every entry has a downloadable file, same as OT.
-      let filePath = "";
-      try {
-        const blob = await buildVbmappXlsxBlob(buildXlsxCfg());
-        const safe = (client.nama || "klien").replace(/[^\w\-]+/g, "_");
-        filePath = `VBMAPP/${safe}_${Date.now()}.xlsx`;
-        const up = await supabase.storage.from(STORAGE_BUCKET).upload(filePath, blob, {
-          contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-          upsert: false,
-        });
-        if (up.error) { filePath = ""; warns.push("Excel: " + up.error.message); }
-      } catch (fileErr) {
-        filePath = "";
-        warns.push("Excel: " + (fileErr && fileErr.message ? fileErr.message : "unknown"));
-      }
-
       // Build the branded Word report ("Laporan" with the grafik) and upload
       // it too, using the same cfg the download button uses.
       let reportPath = "";
@@ -1121,17 +1082,13 @@ export default function VBMappAssessment() {
         max_score: GRAND_MAX ?? null,
         kesimpulan: kesimpulan || null,
         data: row,
-        file_path: filePath || null,
         report_docx_path: reportPath || null,
       });
       if (error) throw error;
       if (warns.length) setStorageWarn(warns.join(" · "));
-      generateReport();
       setSubmitted(true);
     } catch (e) {
-      // Local report should not be held hostage by a failed save.
-      generateReport();
-      setSubmitError("Laporan (.txt) tetap terdownload, tapi gagal menyimpan ke database: " + (e && e.message ? e.message : "unknown"));
+      setSubmitError("Gagal menyimpan ke database: " + (e && e.message ? e.message : "unknown"));
     } finally {
       setSubmitting(false);
     }
@@ -1458,10 +1415,6 @@ export default function VBMappAssessment() {
             <div style={{ display: "flex", gap: 12 }}>
               <button onClick={generateReport}
                 style={{ flex: 1, background: "#EDF2F7", color: "#2D3748", border: "none", borderRadius: 10, padding: "14px 20px", fontSize: 14, fontWeight: 700, cursor: "pointer" }}>📄 Laporan (.txt)</button>
-              <button onClick={downloadExcel} disabled={xlsxBusy}
-                style={{ flex: 1, background: xlsxBusy ? "#A0AEC0" : "#2B6CB0", color: "#fff", border: "none", borderRadius: 10, padding: "14px 20px", fontSize: 14, fontWeight: 700, cursor: xlsxBusy ? "not-allowed" : "pointer" }}>
-                {xlsxBusy ? "Membuat..." : "📊 Excel (Grafik)"}
-              </button>
               <button onClick={downloadWordReport} disabled={wordBusy}
                 style={{ flex: 1, background: wordBusy ? "#A0AEC0" : "#1E75BC", color: "#fff", border: "none", borderRadius: 10, padding: "14px 20px", fontSize: 14, fontWeight: 700, cursor: wordBusy ? "not-allowed" : "pointer" }}>
                 {wordBusy ? "Membuat..." : "📝 Laporan (Word)"}
@@ -1469,10 +1422,10 @@ export default function VBMappAssessment() {
             </div>
             <button onClick={handleSubmit} disabled={submitting}
               style={{ width: "100%", background: submitting ? "#A0AEC0" : "#276749", color: "#fff", border: "none", borderRadius: 10, padding: "14px 20px", fontSize: 15, fontWeight: 700, cursor: submitting ? "not-allowed" : "pointer", boxShadow: "0 2px 12px rgba(39,103,73,0.2)" }}>
-              {submitting ? "Menyimpan..." : "💾 Simpan ke Database + Download Laporan"}
+              {submitting ? "Menyimpan..." : "💾 Simpan ke Database"}
             </button>
             <p style={{ fontSize: 12, color: "#A0AEC0", textAlign: "center", margin: 0 }}>
-              "Excel (Template)" mengunduh file .xlsx dengan grid pyramid berwarna sesuai tampilan Rekap — tidak memerlukan koneksi database.
+Simpan menyimpan data ke database; laporan bisa diunduh di sini atau kapan saja lewat Dashboard.
             </p>
           </div>
         )}

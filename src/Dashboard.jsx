@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { supabase, STORAGE_BUCKET, isConfigured } from "./supabaseClient.js";
 import { GRID_COLS, GRID_ROWS, levelOf, BAND_TINT, TEST_ROUNDS, LEVELS_META } from "./assessments/VBMapp_Assessment.jsx";
-import { downloadWordFromEntry } from "./assessments/reportFromEntry.js";
+import { downloadWordFromEntry, downloadTxtFromEntry } from "./assessments/reportFromEntry.js";
 
 // OT section maxes are static constants in OT_Assessment.jsx (SECTIONS[].max);
 // duplicated here (small, 10 numbers) since OT doesn't store max per entry.
@@ -141,10 +141,51 @@ export default function Dashboard() {
   const [sortDir, setSortDir] = useState("desc"); // "asc" | "desc"
   const [regenId, setRegenId] = useState(null);   // id of the entry being rebuilt
   const [regenErr, setRegenErr] = useState("");
+  const [stTest, setStTest] = useState(null); // { ok, msg } | "running" | null
+
+  // Actually try an upload + public read against the bucket, instead of
+  // inferring bucket health from the absence of file paths on old rows.
+  const testStorage = useCallback(async () => {
+    setStTest("running");
+    if (!isConfigured) {
+      setStTest({ ok: false, msg: "Supabase belum dikonfigurasi di src/supabaseClient.js." });
+      return;
+    }
+    const path = `diagnostics/test_${Date.now()}.txt`;
+    try {
+      const up = await supabase.storage.from(STORAGE_BUCKET)
+        .upload(path, new Blob(["ok"], { type: "text/plain" }), { contentType: "text/plain", upsert: false });
+      if (up.error) {
+        setStTest({ ok: false, msg: `Upload ditolak: ${up.error.message}. Cek policy INSERT untuk role anon pada storage.objects.` });
+        return;
+      }
+      const { data } = supabase.storage.from(STORAGE_BUCKET).getPublicUrl(path);
+      let readable = false;
+      try {
+        const res = await fetch(data.publicUrl, { method: "GET", cache: "no-store" });
+        readable = res.ok;
+      } catch { readable = false; }
+      supabase.storage.from(STORAGE_BUCKET).remove([path]).catch(() => {});
+      setStTest(readable
+        ? { ok: true, msg: `Upload dan baca publik berhasil. Bucket ${STORAGE_BUCKET} sehat — asesmen baru akan tersimpan filenya.` }
+        : { ok: false, msg: `Upload berhasil, tapi file tidak bisa dibaca publik. Jadikan bucket ${STORAGE_BUCKET} public, atau tambahkan policy SELECT untuk anon.` });
+    } catch (err) {
+      setStTest({ ok: false, msg: err && err.message ? err.message : "unknown" });
+    }
+  }, []);
 
   // Rebuild the Word report from the row's stored JSONB and download it.
   // Used when report_docx_path is null (upload failed or predates the feature),
   // so the download button is never absent.
+  const downloadTxt = useCallback(entry => {
+    setRegenErr("");
+    try {
+      downloadTxtFromEntry(entry);
+    } catch (err) {
+      setRegenErr(`Gagal membuat laporan .txt: ${err && err.message ? err.message : "unknown"}`);
+    }
+  }, []);
+
   const regenerate = useCallback(async entry => {
     setRegenErr("");
     setRegenId(entry.id ?? entry.created_at);
@@ -179,13 +220,7 @@ export default function Dashboard() {
 
   useEffect(() => { load(); }, [load]);
 
-  // Resolve a Storage path to a public URL for the "open file" link.
-  const fileUrlFor = entry => {
-    if (!entry.file_path) return "";
-    const { data } = supabase.storage.from(STORAGE_BUCKET).getPublicUrl(entry.file_path);
-    return data ? data.publicUrl : "";
-  };
-  // Same, for the branded Word report ("Laporan").
+  // Resolve the stored Word report's Storage path to a public URL.
   const reportUrlFor = entry => {
     if (!entry.report_docx_path) return "";
     const { data } = supabase.storage.from(STORAGE_BUCKET).getPublicUrl(entry.report_docx_path);
@@ -244,12 +279,10 @@ export default function Dashboard() {
               ))}
             </div>
             <div style={{ display: "flex", gap: 10, marginTop: 14, flexWrap: "wrap" }}>
-              {fileUrlFor(e) && (
-                <a href={fileUrlFor(e)} target="_blank" rel="noreferrer"
-                  style={{ display: "inline-block", background: "#EBF8FF", color: "#2B6CB0", border: "1.5px solid #90CDF4", borderRadius: 8, padding: "8px 14px", fontSize: 13, fontWeight: 700, textDecoration: "none" }}>
-                  ⬇️ Download data (Excel)
-                </a>
-              )}
+              <button onClick={() => downloadTxt(e)}
+                style={{ background: "#EDF2F7", color: "#2D3748", border: "1.5px solid #CBD5E0", borderRadius: 8, padding: "8px 14px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
+                📄 Download Laporan (.txt)
+              </button>
               {reportUrlFor(e) ? (
                 <a href={reportUrlFor(e)} target="_blank" rel="noreferrer"
                   style={{ display: "inline-block", background: "#EBF8FF", color: "#1E75BC", border: "1.5px solid #90CDF4", borderRadius: 8, padding: "8px 14px", fontSize: 13, fontWeight: 700, textDecoration: "none" }}>
@@ -263,11 +296,6 @@ export default function Dashboard() {
                 </button>
               )}
             </div>
-            {!fileUrlFor(e) && (
-              <div style={{ fontSize: 12, color: "#A0AEC0", fontStyle: "italic", marginTop: 8 }}>
-                File Excel tidak tersimpan di Storage untuk entri ini — laporan Word di atas dibuat ulang dari data.
-              </div>
-            )}
             {regenErr && (
               <div style={{ background: "#FFF5F5", border: "1.5px solid #FC8181", borderRadius: 8, padding: "10px 14px", fontSize: 13, color: "#C53030", marginTop: 10 }}>
                 ⚠️ {regenErr}
@@ -401,11 +429,22 @@ export default function Dashboard() {
           </div>
         )}
 
-        {entries && entries.length > 0 && entries.every(e => !e.file_path && !e.report_docx_path) && (
+        {entries && entries.length > 0 && entries.every(e => !e.report_docx_path) && (
           <div style={{ background: "#FFFFF0", border: "1.5px solid #F6E05E", borderRadius: 8, padding: "12px 16px", fontSize: 13, color: "#744210", marginBottom: 16, lineHeight: 1.6 }}>
-            Tidak ada satu pun entri yang punya file di Storage. Biasanya ini berarti bucket
-            <b> {STORAGE_BUCKET}</b> belum dibuat, belum public, atau belum punya policy INSERT
-            untuk role <b>anon</b>. Tombol 📝 di bawah tetap berfungsi — laporan dibuat ulang dari data.
+            Belum ada entri yang punya laporan tersimpan di Storage. Ini normal untuk entri yang
+            disimpan sebelum bucket <b>{STORAGE_BUCKET}</b> dikonfigurasi — entri lama tidak terisi surut.
+            Tombol 📄 dan 📝 tetap berfungsi: laporan dibuat ulang dari data.
+            <div style={{ marginTop: 10, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+              <button onClick={testStorage} disabled={stTest === "running"}
+                style={{ background: "#fff", color: "#744210", border: "1.5px solid #F6E05E", borderRadius: 8, padding: "7px 14px", fontSize: 13, fontWeight: 700, cursor: stTest === "running" ? "wait" : "pointer" }}>
+                {stTest === "running" ? "Menguji…" : "Tes koneksi Storage"}
+              </button>
+              {stTest && stTest !== "running" && (
+                <span style={{ fontSize: 12, color: stTest.ok ? "#276749" : "#C53030", fontWeight: 600 }}>
+                  {stTest.ok ? "✅" : "⚠️"} {stTest.msg}
+                </span>
+              )}
+            </div>
           </div>
         )}
 
@@ -422,7 +461,6 @@ export default function Dashboard() {
         {filtered.length > 0 && (
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {sorted.map((e, i) => {
-              const url = fileUrlFor(e);
               const reportUrl = reportUrlFor(e);
               return (
                 <div key={i} role="button" tabIndex={0}
@@ -438,13 +476,11 @@ export default function Dashboard() {
                   {((e.total_score ?? (e.data && e.data.total_skor)) != null) && (
                     <span style={{ fontSize: 13, fontWeight: 800, color: "#2B6CB0" }}>{e.total_score ?? (e.data && e.data.total_skor)}</span>
                   )}
-                  {url && (
-                    <a href={url} target="_blank" rel="noreferrer" onClick={ev => ev.stopPropagation()}
-                      title="Download data (Excel)"
-                      style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 32, height: 32, borderRadius: 8, background: "#EBF8FF", color: "#2B6CB0", textDecoration: "none", fontSize: 15, flex: "none" }}>
-                      ⬇️
-                    </a>
-                  )}
+                  <button onClick={ev => { ev.stopPropagation(); downloadTxt(e); }}
+                    title="Download Laporan (.txt)"
+                    style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 32, height: 32, borderRadius: 8, background: "#EDF2F7", color: "#2D3748", border: "1.5px solid #CBD5E0", fontSize: 15, flex: "none", cursor: "pointer", padding: 0 }}>
+                    📄
+                  </button>
                   {reportUrl ? (
                     <a href={reportUrl} target="_blank" rel="noreferrer" onClick={ev => ev.stopPropagation()}
                       title="Download Laporan (Word)"

@@ -1,6 +1,4 @@
 import { useState, useCallback } from "react";
-import JSZip from "jszip";
-import templateUrl from "./ot_template.xlsx?url";
 import { supabase, STORAGE_BUCKET, isConfigured } from "../supabaseClient.js";
 import { buildOTWordBlob } from "./wordReport_OT.js";
 
@@ -323,7 +321,6 @@ export default function ANBAssessment() {
   // Non-fatal Storage upload failures — the row still saves, but we tell the
   // user so a misconfigured bucket/policy is visible instead of silent.
   const [storageWarn, setStorageWarn] = useState("");
-  const [xlsxBusy, setXlsxBusy] = useState(false);
   const [wordBusy, setWordBusy] = useState(false);
   const [xlsxError, setXlsxError] = useState("");
 
@@ -407,139 +404,6 @@ export default function ANBAssessment() {
     URL.revokeObjectURL(url);
   }
 
-  // ── EXCEL TEMPLATE EXPORT ─────────────────────────────────────────────────
-  // Fills the bundled template by surgically editing the cells inside the xlsx
-  // zip (sheet1.xml values + styles.xml fills for the Kategori cells). The
-  // workbook is NEVER rewritten by a spreadsheet library, so nothing that Excel
-  // would reject is introduced — every other byte of the template is preserved.
-  // Requires "jszip" (npm i jszip).
-  // Builds the filled workbook (main form + Catatan Klinis sheet) and returns a Blob.
-  async function buildFilledXlsxBlob() {
-    const resp = await fetch(templateUrl);
-    if (!resp.ok) throw new Error("template fetch failed: " + resp.status);
-    const buf = await resp.arrayBuffer();
-    const sig = new Uint8Array(buf.slice(0, 2));
-    if (sig[0] !== 0x50 || sig[1] !== 0x4b) throw new Error("template is not a valid xlsx");
-
-    const zip = await JSZip.loadAsync(buf);
-    let sheet = await zip.file("xl/worksheets/sheet1.xml").async("string");
-    let styles = await zip.file("xl/styles.xml").async("string");
-
-    const esc = s => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-    const setCell = (ref, inner, extraAttr = "") => {
-      const re = new RegExp(`<c r="${ref}"([^>]*?)(?:/>|>[\\s\\S]*?</c>)`);
-      sheet = sheet.replace(re, (m, attrs) => {
-        const s = (attrs.match(/\ss="\d+"/) || [""])[0];
-        return `<c r="${ref}"${s}${extraAttr}>${inner}</c>`;
-      });
-    };
-    const setNumber = (ref, num) => setCell(ref, `<v>${num}</v>`);
-    const setString = (ref, text) => setCell(ref, `<is><t xml:space="preserve">${esc(text)}</t></is>`, ` t="inlineStr"`);
-
-    const baseXf = '<xf numFmtId="0" fontId="1" fillId="0" borderId="12" applyAlignment="1" pivotButton="0" quotePrefix="0" xfId="0"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>';
-    const fillCount = parseInt((styles.match(/<fills count="(\d+)">/) || [])[1] || "6", 10);
-    const xfCount = parseInt((styles.match(/<cellXfs count="(\d+)">/) || [])[1] || "63", 10);
-    const styleIndexFor = {};
-    let newFills = "", newXfs = "";
-    KATEGORI_ORDER.forEach((label, i) => {
-      const rgb = KATEGORI[label].rgb;
-      newFills += `<fill><patternFill patternType="solid"><fgColor rgb="${rgb}"/><bgColor rgb="${rgb}"/></patternFill></fill>`;
-      newXfs += baseXf.replace('fillId="0"', `fillId="${fillCount + i}"`);
-      styleIndexFor[label] = xfCount + i;
-    });
-    styles = styles
-      .replace(/<fills count="\d+">/, `<fills count="${fillCount + 3}">`)
-      .replace(/<\/fills>/, newFills + "</fills>")
-      .replace(/<cellXfs count="\d+">/, `<cellXfs count="${xfCount + 3}">`)
-      .replace(/<\/cellXfs>/, newXfs + "</cellXfs>");
-
-    Object.entries(TEMPLATE_CLIENT_CELLS).forEach(([key, ref]) => {
-      if (client[key]) setString(ref, client[key]);
-    });
-    SECTIONS.forEach(section => {
-      const map = TEMPLATE_SECTION_MAP[section.id];
-      if (!map) return;
-      section.items.forEach((_, i) => {
-        const v = scores[`${section.id}_${i}`];
-        if (map.rows[i] != null && v) setNumber(`G${map.rows[i]}`, parseInt(v));
-      });
-      const total = sectionTotal(scores, section.id);
-      const flag = sectionFlag(total, section);
-      const label = flag && flag.label;
-      if (label && KATEGORI[label]) {
-        const styleIdx = styleIndexFor[label];
-        const re = new RegExp(`<c r="${map.kategori}"[^>]*?(?:/>|>[\\s\\S]*?</c>)`);
-        sheet = sheet.replace(re, `<c r="${map.kategori}" s="${styleIdx}" t="inlineStr"><is><t xml:space="preserve">${esc(KATEGORI[label].text)}</t></is></c>`);
-      }
-    });
-    if (kesimpulan) setString(KESIMPULAN_CELL, kesimpulan);
-
-    zip.file("xl/worksheets/sheet1.xml", sheet);
-    zip.file("xl/styles.xml", styles);
-
-    // Second sheet: Catatan Klinis
-    const xe = s => String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\r\n|\r|\n/g, "&#10;");
-    const cellStr = (ref, text) => `<c r="${ref}" t="inlineStr"><is><t xml:space="preserve">${xe(text)}</t></is></c>`;
-    const rows = [];
-    let r = 1;
-    rows.push(`<row r="${r++}"><c r="A1" t="inlineStr"><is><t>CATATAN KLINIS PER ASPEK</t></is></c></row>`);
-    r++;
-    rows.push(`<row r="${r}">${cellStr("A" + r, "Aspek")}${cellStr("B" + r, "Catatan Klinis")}</row>`); r++;
-    SECTIONS.forEach(section => {
-      const note = notes[section.id];
-      rows.push(`<row r="${r}">${cellStr("A" + r, `${section.code} — ${section.label}`)}${cellStr("B" + r, note || "-")}</row>`);
-      r++;
-    });
-    r++;
-    rows.push(`<row r="${r}"><c r="A${r}" t="inlineStr"><is><t>KESIMPULAN &amp; REKOMENDASI KLINIS</t></is></c></row>`); r++;
-    rows.push(`<row r="${r}">${cellStr("A" + r, kesimpulan || "(Belum diisi)")}</row>`); r++;
-    const sheet2 =
-      `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
-      `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">` +
-      `<cols><col min="1" max="1" width="34" customWidth="1"/><col min="2" max="2" width="70" customWidth="1"/></cols>` +
-      `<sheetData>${rows.join("")}</sheetData></worksheet>`;
-    zip.file("xl/worksheets/sheet2.xml", sheet2);
-
-    let wbxml = await zip.file("xl/workbook.xml").async("string");
-    wbxml = wbxml.replace("</sheets>", `<sheet xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" name="Catatan Klinis" sheetId="2" state="visible" r:id="rId4"/></sheets>`);
-    zip.file("xl/workbook.xml", wbxml);
-    let wbrels = await zip.file("xl/_rels/workbook.xml.rels").async("string");
-    wbrels = wbrels.replace("</Relationships>", `<Relationship Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml" Id="rId4"/></Relationships>`);
-    zip.file("xl/_rels/workbook.xml.rels", wbrels);
-    let ct = await zip.file("[Content_Types].xml").async("string");
-    ct = ct.replace("</Types>", `<Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>`);
-    zip.file("[Content_Types].xml", ct);
-
-    return zip.generateAsync({
-      type: "blob",
-      mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-      compression: "DEFLATE",
-    });
-  }
-
-  const excelFileName = () => {
-    const dateStr = new Date().toLocaleDateString("id-ID", { day: "2-digit", month: "long", year: "numeric" });
-    return `ANB_Assessment_${(client.nama || "klien").replace(/\s+/g, "_")}_${client.tanggalAsesmen || dateStr}.xlsx`;
-  };
-
-  async function downloadExcelTemplate() {
-    setXlsxBusy(true);
-    setXlsxError("");
-    try {
-      const outBlob = await buildFilledXlsxBlob();
-      const url = URL.createObjectURL(outBlob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = excelFileName();
-      a.click();
-      URL.revokeObjectURL(url);
-    } catch (err) {
-      setXlsxError("Gagal membuat file Excel: " + (err && err.message ? err.message : "unknown"));
-    } finally {
-      setXlsxBusy(false);
-    }
-  }
-
   function buildWordCfg() {
     return {
       client, testRound,
@@ -620,22 +484,6 @@ export default function ANBAssessment() {
     try {
       if (!isConfigured) throw new Error("Supabase belum dikonfigurasi (isi src/supabaseClient.js).");
 
-      // 1) Build the filled workbook and upload it to Storage.
-      let filePath = "";
-      try {
-        const blob = await buildFilledXlsxBlob();
-        const safe = (client.nama || "klien").replace(/[^\w\-]+/g, "_");
-        filePath = `OT/${safe}_${Date.now()}.xlsx`;
-        const up = await supabase.storage.from(STORAGE_BUCKET).upload(filePath, blob, {
-          contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-          upsert: false,
-        });
-        if (up.error) { filePath = ""; warns.push("Excel: " + up.error.message); }
-      } catch (fileErr) {
-        filePath = "";
-        warns.push("Excel: " + (fileErr && fileErr.message ? fileErr.message : "unknown"));
-      }
-
       // 2) Build the branded Word report ("Laporan") and upload it too, so the
       //    entry is downloadable as both a data file and a polished report.
       let reportPath = "";
@@ -666,17 +514,13 @@ export default function ANBAssessment() {
         total_score: totalSkor ?? null,
         kesimpulan: kesimpulan || null,
         data: row,
-        file_path: filePath || null,
         report_docx_path: reportPath || null,
       });
       if (error) throw error;
       if (warns.length) setStorageWarn(warns.join(" · "));
-
-      generatePDF();
       setSubmitted(true);
     } catch (e) {
-      generatePDF();
-      setSubmitError("Laporan tetap terunduh, tapi gagal menyimpan ke database: " + (e && e.message ? e.message : "unknown"));
+      setSubmitError("Gagal menyimpan ke database: " + (e && e.message ? e.message : "unknown"));
     } finally {
       setSubmitting(false);
     }
@@ -989,13 +833,6 @@ export default function ANBAssessment() {
                 📄 Laporan (.txt)
               </button>
               <button
-                onClick={downloadExcelTemplate}
-                disabled={xlsxBusy}
-                style={{ flex: 1, background: xlsxBusy ? "#A0AEC0" : "#2B6CB0", color: "#fff", border: "none", borderRadius: 10, padding: "14px 20px", fontSize: 14, fontWeight: 700, cursor: xlsxBusy ? "not-allowed" : "pointer" }}
-              >
-                {xlsxBusy ? "Membuat..." : "📊 Excel (Form)"}
-              </button>
-              <button
                 onClick={downloadWordReport}
                 disabled={wordBusy}
                 style={{ flex: 1, background: wordBusy ? "#A0AEC0" : "#1E75BC", color: "#fff", border: "none", borderRadius: 10, padding: "14px 20px", fontSize: 14, fontWeight: 700, cursor: wordBusy ? "not-allowed" : "pointer" }}
@@ -1008,10 +845,10 @@ export default function ANBAssessment() {
               disabled={submitting}
               style={{ width: "100%", background: submitting ? "#A0AEC0" : "#276749", color: "#fff", border: "none", borderRadius: 10, padding: "14px 20px", fontSize: 15, fontWeight: 700, cursor: submitting ? "not-allowed" : "pointer", boxShadow: "0 2px 12px rgba(39,103,73,0.2)", transition: "background 0.15s" }}
             >
-              {submitting ? "Menyimpan..." : "💾 Simpan ke Database + Download Laporan"}
+              {submitting ? "Menyimpan..." : "💾 Simpan ke Database"}
             </button>
             <p style={{ fontSize: 12, color: "#A0AEC0", textAlign: "center", margin: 0 }}>
-              "Excel (Form)" mengunduh file .xlsx sesuai template ANB — data & skor terisi, sel Kategori diwarnai sesuai klasifikasi.
+Simpan menyimpan data ke database; laporan bisa diunduh di sini atau kapan saja lewat Dashboard.
             </p>
           </div>
         )}

@@ -1,6 +1,5 @@
 import { useState, useCallback, useMemo } from "react";
 import { supabase, isConfigured, STORAGE_BUCKET } from "../supabaseClient.js";
-import { buildABLLSXlsxBlob } from "./reportBuilders.js";
 import { buildABLLSWordBlob } from "./wordReport_ABLLS.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -451,7 +450,6 @@ export default function ABLLSAssessment() {
   // Non-fatal Storage upload failures — the row still saves, but we surface it
   // so a misconfigured bucket/policy is visible instead of silent.
   const [storageWarn, setStorageWarn] = useState("");
-  const [xlsxBusy, setXlsxBusy] = useState(false);
   const [wordBusy, setWordBusy] = useState(false);
 
   // tulis jawaban → skor ikut terisi bila butir punya kriteria terhitung
@@ -583,23 +581,6 @@ export default function ABLLSAssessment() {
       data.total_skor = total.got;
       data.max_skor = total.max;
 
-      // Build the same Excel report the download button produces, and store it
-      // so every entry has a downloadable file, same as OT and VB-MAPP.
-      let filePath = "";
-      try {
-        const blob = await buildABLLSXlsxBlob(buildXlsxCfg());
-        const safe = (client.nama || "klien").replace(/[^\w\-]+/g, "_");
-        filePath = `ABLLS/${safe}_${Date.now()}.xlsx`;
-        const up = await supabase.storage.from(STORAGE_BUCKET).upload(filePath, blob, {
-          contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-          upsert: false,
-        });
-        if (up.error) { filePath = ""; warns.push("Excel: " + up.error.message); }
-      } catch (fileErr) {
-        filePath = "";
-        warns.push("Excel: " + (fileErr && fileErr.message ? fileErr.message : "unknown"));
-      }
-
       // Build the branded Word report ("Laporan") and upload it too.
       let reportPath = "";
       try {
@@ -630,7 +611,6 @@ export default function ABLLSAssessment() {
         max_score: total.max ?? null,
         kesimpulan: kesimpulan || null,
         data,
-        file_path: filePath || null,
         report_docx_path: reportPath || null,
       });
       if (error) throw error;
@@ -660,25 +640,6 @@ export default function ABLLSAssessment() {
       totalGot: total.got, totalMax: total.max,
       kesimpulan, rekomendasi,
     };
-  }
-
-  async function downloadExcel() {
-    setXlsxBusy(true);
-    try {
-      const cfg = buildXlsxCfg();
-      const blob = await buildABLLSXlsxBlob(cfg);
-      const date = new Date().toLocaleDateString("id-ID", { day: "2-digit", month: "long", year: "numeric" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `ABLLSR_Intraverbal_${(client.nama || "klien").replace(/\s+/g, "_")}_Tes${testRound}_${client.tanggalAsesmen || date}.xlsx`;
-      a.click();
-      URL.revokeObjectURL(url);
-    } catch (e) {
-      setSaveErr("Gagal membuat file Excel: " + (e && e.message ? e.message : "unknown"));
-    } finally {
-      setXlsxBusy(false);
-    }
   }
 
   async function downloadWordReport() {
@@ -1015,9 +976,6 @@ export default function ABLLSAssessment() {
             <div style={{ display: "flex", gap: 12 }}>
               <button onClick={generateReport}
                 style={{ flex: 1, background: "#EDF2F7", color: "#2D3748", border: "none", borderRadius: 10, padding: "14px 20px", fontSize: 14, fontWeight: 700, cursor: "pointer" }}>📄 Laporan (.txt)</button>
-              <button onClick={downloadExcel} disabled={xlsxBusy}
-                style={{ flex: 1, background: xlsxBusy ? "#A0AEC0" : "#2B6CB0", color: "#fff", border: "none", borderRadius: 10, padding: "14px 20px", fontSize: 14, fontWeight: 700, cursor: xlsxBusy ? "not-allowed" : "pointer" }}>
-                {xlsxBusy ? "Membuat..." : "📊 Excel"}</button>
               <button onClick={downloadWordReport} disabled={wordBusy}
                 style={{ flex: 1, background: wordBusy ? "#A0AEC0" : "#1E75BC", color: "#fff", border: "none", borderRadius: 10, padding: "14px 20px", fontSize: 14, fontWeight: 700, cursor: wordBusy ? "not-allowed" : "pointer" }}>
                 {wordBusy ? "Membuat..." : "📝 Laporan (Word)"}</button>
