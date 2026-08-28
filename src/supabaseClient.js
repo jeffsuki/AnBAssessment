@@ -11,8 +11,8 @@
 
 import { createClient } from "@supabase/supabase-js";
 
-export const SUPABASE_URL = "PASTE_YOUR_PROJECT_URL_HERE";
-export const SUPABASE_ANON_KEY = "PASTE_YOUR_ANON_KEY_HERE";
+export const SUPABASE_URL = "https://dufpedtybelfkpiruwyb.supabase.co";
+export const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImR1ZnBlZHR5YmVsZmtwaXJ1d3liIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODc4MTQ0MDcsImV4cCI6MjEwMzM5MDQwN30.I45Nqym2pXAQU3PwC8UL2JVW1xF9k5nz3W5bN0qsQPU";
 export const STORAGE_BUCKET = "assessment-files";
 
 export const isConfigured =
