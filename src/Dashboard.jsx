@@ -131,6 +131,45 @@ function VbmappGridMini({ entry }) {
   );
 }
 
+// Password-gated confirmation for a destructive delete. Rendered as an overlay
+// so it can't be dismissed by accident, and the button stays disabled until the
+// password matches.
+function DeleteConfirm({ entry, pw, setPw, err, busy, onCancel, onConfirm, expected }) {
+  if (!entry) return null;
+  const name = entry.client_name || (entry.data && entry.data.nama) || "(tanpa nama)";
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(26,32,44,0.55)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20, zIndex: 50 }}>
+      <div style={{ background: "#fff", borderRadius: 14, padding: 26, maxWidth: 420, width: "100%", boxShadow: "0 10px 40px rgba(0,0,0,0.25)" }}>
+        <h3 style={{ fontSize: 17, fontWeight: 700, color: "#1A202C", margin: "0 0 8px" }}>Hapus entri ini?</h3>
+        <p style={{ fontSize: 13, color: "#4A5568", lineHeight: 1.6, margin: "0 0 4px" }}>
+          <b>{entry.type}</b> — {name}{entry.assessment_date ? ` · ${fmtDate(entry.assessment_date)}` : ""}
+        </p>
+        <p style={{ fontSize: 13, color: "#C53030", lineHeight: 1.6, margin: "0 0 16px" }}>
+          Data asesmen dan laporannya akan dihapus permanen. Tindakan ini tidak bisa dibatalkan.
+        </p>
+        <label style={{ display: "block", fontSize: 12, fontWeight: 600, color: "#4A5568", marginBottom: 6 }}>
+          Masukkan password hapus
+        </label>
+        <input type="password" value={pw} autoFocus
+          onChange={ev => setPw(ev.target.value)}
+          onKeyDown={ev => { if (ev.key === "Enter" && pw === expected && !busy) onConfirm(); }}
+          style={{ width: "100%", padding: "10px 12px", border: err ? "1.5px solid #FC8181" : "1.5px solid #CBD5E0", borderRadius: 8, fontSize: 14, color: "#2D3748", boxSizing: "border-box", marginBottom: err ? 8 : 18 }} />
+        {err && <p style={{ color: "#C53030", fontSize: 12, margin: "0 0 14px" }}>{err}</p>}
+        <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+          <button onClick={onCancel} disabled={busy}
+            style={{ background: "#EDF2F7", color: "#4A5568", border: "none", borderRadius: 8, padding: "10px 18px", fontSize: 14, fontWeight: 700, cursor: busy ? "wait" : "pointer" }}>
+            Batal
+          </button>
+          <button onClick={onConfirm} disabled={busy || pw !== expected}
+            style={{ background: busy || pw !== expected ? "#FEB2B2" : "#C53030", color: "#fff", border: "none", borderRadius: 8, padding: "10px 18px", fontSize: 14, fontWeight: 700, cursor: busy || pw !== expected ? "not-allowed" : "pointer" }}>
+            {busy ? "Menghapus…" : "Hapus permanen"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function Dashboard() {
   const [entries, setEntries] = useState(null); // null = loading
   const [error, setError] = useState("");
@@ -142,6 +181,42 @@ export default function Dashboard() {
   const [regenId, setRegenId] = useState(null);   // id of the entry being rebuilt
   const [regenErr, setRegenErr] = useState("");
   const [stTest, setStTest] = useState(null); // { ok, msg } | "running" | null
+  const [pendingDelete, setPendingDelete] = useState(null); // entry awaiting confirmation
+  const [deletePw, setDeletePw] = useState("");
+  const [deleteErr, setDeleteErr] = useState("");
+  const [deleting, setDeleting] = useState(false);
+
+  // Deleting an assessment is destructive and irreversible, so it's gated behind
+  // a separate password that isn't the site password — a mistyped click can't
+  // remove a client's record.
+  const DELETE_PASSWORD = "ABeyondd3l3t3";
+
+  const confirmDelete = useCallback(async () => {
+    if (deletePw !== DELETE_PASSWORD) {
+      setDeleteErr("Password salah.");
+      return;
+    }
+    const entry = pendingDelete;
+    setDeleting(true);
+    setDeleteErr("");
+    try {
+      // Remove the stored report first; a leftover file with no row is harmless,
+      // but a row pointing at a deleted file would show a broken link.
+      if (entry.report_docx_path) {
+        await supabase.storage.from(STORAGE_BUCKET).remove([entry.report_docx_path]);
+      }
+      const { error } = await supabase.from("assessments").delete().eq("id", entry.id);
+      if (error) throw error;
+      setEntries(prev => (prev || []).filter(x => x.id !== entry.id));
+      setPendingDelete(null);
+      setDeletePw("");
+      setSelected(null);
+    } catch (err) {
+      setDeleteErr(`Gagal menghapus: ${err && err.message ? err.message : "unknown"}. Pastikan tabel assessments punya policy DELETE untuk role anon.`);
+    } finally {
+      setDeleting(false);
+    }
+  }, [deletePw, pendingDelete]);
 
   // Actually try an upload + public read against the bucket, instead of
   // inferring bucket health from the absence of file paths on old rows.
@@ -257,10 +332,14 @@ export default function Dashboard() {
             style={{ background: "rgba(255,255,255,0.15)", color: "#fff", border: "none", borderRadius: 8, padding: "6px 12px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
             ← Daftar
           </button>
-          <div>
+          <div style={{ flex: 1 }}>
             <div style={{ color: "#BEE3F8", fontSize: 11, fontWeight: 600, letterSpacing: 1, textTransform: "uppercase" }}>{e.type} · Detail Entri</div>
             <div style={{ color: "#fff", fontSize: 17, fontWeight: 700 }}>{nameOf(e)}</div>
           </div>
+          <button onClick={() => { setPendingDelete(e); setDeletePw(""); setDeleteErr(""); }}
+            style={{ background: "rgba(197,48,48,0.9)", color: "#fff", border: "none", borderRadius: 8, padding: "8px 14px", fontSize: 13, fontWeight: 700, cursor: "pointer", flex: "none" }}>
+            🗑 Hapus
+          </button>
         </div>
 
         <div style={{ maxWidth: 760, margin: "0 auto", padding: "20px 16px 48px" }}>
@@ -377,6 +456,11 @@ export default function Dashboard() {
             );
           })()}
 
+          <DeleteConfirm entry={pendingDelete} pw={deletePw} setPw={setDeletePw} err={deleteErr}
+            busy={deleting} expected={DELETE_PASSWORD}
+            onCancel={() => { setPendingDelete(null); setDeletePw(""); setDeleteErr(""); }}
+            onConfirm={confirmDelete} />
+
           {/* Conclusion */}
           {e.kesimpulan && (
             <div style={{ background: "#fff", borderRadius: 12, padding: 20, boxShadow: "0 1px 8px rgba(0,0,0,0.06)" }}>
@@ -420,6 +504,11 @@ export default function Dashboard() {
             ↻ Muat ulang
           </button>
         </div>
+
+        <DeleteConfirm entry={pendingDelete} pw={deletePw} setPw={setDeletePw} err={deleteErr}
+          busy={deleting} expected={DELETE_PASSWORD}
+          onCancel={() => { setPendingDelete(null); setDeletePw(""); setDeleteErr(""); }}
+          onConfirm={confirmDelete} />
 
         {entries === null && <div style={{ textAlign: "center", color: "#718096", padding: 40 }}>Memuat entri…</div>}
 
@@ -495,6 +584,11 @@ export default function Dashboard() {
                       {regenId === (e.id ?? e.created_at) ? "…" : "📝"}
                     </button>
                   )}
+                  <button onClick={ev => { ev.stopPropagation(); setPendingDelete(e); setDeletePw(""); setDeleteErr(""); }}
+                    title="Hapus entri"
+                    style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 32, height: 32, borderRadius: 8, background: "#FFF5F5", color: "#C53030", border: "1.5px solid #FEB2B2", fontSize: 14, flex: "none", cursor: "pointer", padding: 0 }}>
+                    🗑
+                  </button>
                   <span style={{ color: "#CBD5E0", fontSize: 18 }}>›</span>
                 </div>
               );

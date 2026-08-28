@@ -406,7 +406,9 @@ export default function ANBAssessment() {
 
   function buildWordCfg() {
     return {
-      client, testRound,
+      // OT has no test-round selector (unlike VB-MAPP/ABLLS); the Word report
+      // doesn't print one either, so this is a fixed placeholder.
+      client, testRound: 1,
       sections: SECTIONS.map(section => {
         const total = sectionTotal(scores, section.id);
         const flag = sectionFlag(total, section);
